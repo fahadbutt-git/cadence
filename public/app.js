@@ -7,6 +7,8 @@ import { parseCommand, isBargeIn, cleanTranscript, VOICE_HELP } from './js/core/
 import { Comments } from './js/comments.js';
 import { LanguageChecker } from './js/language.js';
 import { FindBar } from './js/find.js';
+import { Tracker } from './js/tracking.js';
+import { WordChoice } from './js/wordchoice.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -50,6 +52,8 @@ const player = new Player({
 const dictation = new Dictation();
 const comments = new Comments(editor, { list: $('#commentList'), empty: $('#commentsEmpty'), count: $('#commentCount'), showResolved: $('#showResolved') });
 const language = new LanguageChecker(editor, $('#issuePop'));
+const tracker = new Tracker(editor, { list: $('#changeList'), empty: $('#changesEmpty'), count: $('#changeCount'), markup: $('#markup') });
+const wordChoice = new WordChoice(editor, $('#choicePop'), api);
 const finder = new FindBar(editor, {
   bar: $('#findBar'), input: $('#findInput'), replace: $('#replaceInput'), count: $('#findCount'),
   prev: $('#findPrev'), next: $('#findNext'), one: $('#replaceOne'), all: $('#replaceAll'), matchCase: $('#findCase'), close: $('#findClose'),
@@ -259,6 +263,9 @@ async function openDocument(id, { atBookmark = false, play = false, focusTitle =
     $('#wordTarget').value = doc.wordTarget || '';
     editor.load(doc.paragraphs);
     comments.load(doc.comments || []);
+    tracker.load(doc.tracking);
+    setTrackUi();
+    wordChoice.hide();
     finder.close();
     language.hide();
     language.schedule(0);
@@ -302,6 +309,7 @@ async function flushSave(extra = {}) {
     wordTarget: Number($('#wordTarget').value) || null,
     paragraphs: editor.getParagraphs(),
     comments: comments.all(),
+    tracking: tracker.toJSON(),
     ...extra,
   };
   state.dirty = false;
@@ -357,6 +365,7 @@ comments.addEventListener('change', () => scheduleSave());
 editor.addEventListener('change', () => {
   scheduleSave();
   language.schedule();
+  tracker.schedule();
   comments.render();
   if (player.playing) {
     player.pause();
@@ -712,6 +721,7 @@ editor.addEventListener('selection', () => {
     if (!info || player.playing || quietSelection) { selBar.hidden = true; quietSelection = false; return; }
     lastSelection = info;
     selBar.querySelectorAll('[data-sel]').forEach((b) => { b.hidden = info.multi && b.dataset.sel !== 'listen'; });
+    $('#choiceBtn').textContent = WordChoice.isShort(info.text) ? 'Synonyms' : 'Reword';
     selBar.hidden = false;
     const w = selBar.offsetWidth;
     const x = Math.max(8, Math.min(window.innerWidth - w - 8, info.rect.left + info.rect.width / 2 - w / 2));
@@ -732,6 +742,7 @@ selBar.addEventListener('click', (e) => {
     return openCommentComposer();
   }
   if (act === 'heading') return editor.toggleHeading(info.index);
+  if (act === 'choice') return wordChoice.open({ index: info.index, start: info.start, end: info.end, text: info.text }, info.rect, { style: $('#styleSelect').value });
   const target = { index: info.index, start: info.start, end: info.end, text: info.text, kind: 'selection' };
   if (act === 'ask') {
     openPanel('edit');
@@ -848,6 +859,15 @@ function suggestionHere() {
   return editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || editor.suggestions.at(-1);
 }
 
+function describeChange(h) {
+  if (!h) return '';
+  const short = (t) => t.trim().split(/\s+/).slice(0, 12).join(' ').replace(/[.!?,;:]+$/, '');
+  if (h.kind === 'para-del') return `A removed paragraph that began, ${short(h.del)}.`;
+  if (h.kind === 'para-ins') return `A new paragraph, ${short(h.ins)}.`;
+  if (h.del && h.ins) return `${short(h.del)}, changed to, ${short(h.ins)}.`;
+  return h.ins ? `Added, ${short(h.ins)}.` : `Deleted, ${short(h.del)}.`;
+}
+
 async function runCommand(cmd, heard) {
   switch (cmd.type) {
     case 'none': return;
@@ -860,14 +880,31 @@ async function runCommand(cmd, heard) {
     case 'nextParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) + 1);
     case 'prevParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) - 1);
     case 'gotoParagraph': return goToParagraph(cmd.n < 0 ? -1 : cmd.n - 1);
+    case 'trackOn': await toggleTracking(true); return say('Tracking changes.');
+    case 'trackOff': {
+      const n = tracker.hunks.length;
+      if (n) return say(`There ${n === 1 ? 'is one change' : `are ${n} changes`} to review first. Say accept all changes, or reject all changes.`);
+      await toggleTracking(false);
+      return say('Tracking is off.');
+    }
+    case 'nextChange':
+    case 'prevChange': {
+      const h = tracker.step(cmd.type === 'nextChange' ? 1 : -1);
+      if (!h) return say('There are no tracked changes.');
+      return say(describeChange(h));
+    }
+    case 'acceptAllChanges': { const n = tracker.acceptAll(); return say(n ? `Accepted ${n} change${n === 1 ? '' : 's'}.` : 'There are no changes to accept.'); }
+    case 'rejectAllChanges': { const n = tracker.rejectAll(); return say(n ? `Rejected ${n} change${n === 1 ? '' : 's'}. Say undo to bring them back.` : 'There are no changes to reject.'); }
     case 'accept': {
       const s = suggestionHere();
+      if (!s && tracker.activeId) { tracker.accept(tracker.activeId); return say(tracker.activeId ? `Accepted. Next: ${describeChange(tracker.find(tracker.activeId))}` : 'Accepted. That was the last change.'); }
       if (!s) return say('There is no suggestion to accept.');
       handleSuggestion(s.id, 'accept');
       return say('Done. Say continue when you are ready.');
     }
     case 'reject': {
       const s = suggestionHere();
+      if (!s && tracker.activeId) { tracker.reject(tracker.activeId); return say(tracker.activeId ? `Rejected. Next: ${describeChange(tracker.find(tracker.activeId))}` : 'Rejected. That was the last change.'); }
       if (!s) return say('Nothing to reject.');
       handleSuggestion(s.id, 'reject');
       return say('Kept the original.');
@@ -1069,6 +1106,80 @@ $('#reviewBtn').addEventListener('click', async () => {
   }
 });
 
+// ---------- Track changes ----------
+
+function setTrackUi() {
+  $('#trackToggle').setAttribute('aria-pressed', String(tracker.on));
+  $('#trackOn').checked = tracker.on;
+  $('#markupView').value = tracker.view;
+  const any = tracker.hunks.length > 0;
+  ['#acceptAll', '#rejectAll', '#changePrev', '#changeNext'].forEach((sel) => { $(sel).disabled = !any; });
+}
+
+async function toggleTracking(force) {
+  const turnOn = force ?? !tracker.on;
+  if (turnOn) {
+    tracker.start();
+    openPanel('changes');
+    toast('Tracking changes. Edits now show as changes you can accept or reject.');
+  } else if (tracker.on || tracker.baseline) {
+    const n = tracker.hunks.length;
+    if (n && !(await confirmDialog(`Stop tracking? The ${n} pending change${n === 1 ? '' : 's'} will be kept in the text as accepted. Reject any you do not want first.`))) {
+      setTrackUi();
+      return;
+    }
+    tracker.stop();
+    toast('Tracking stopped');
+  }
+  setTrackUi();
+}
+
+tracker.addEventListener('change', () => { scheduleSave(); setTrackUi(); });
+tracker.addEventListener('update', setTrackUi);
+tracker.addEventListener('view', (e) => {
+  $('#paper').hidden = e.detail === 'all';
+  $('#markupView').value = e.detail;
+  if (e.detail === 'all') { selBar.hidden = true; language.hide(); }
+});
+$('#trackToggle').addEventListener('click', () => toggleTracking());
+$('#trackOn').addEventListener('change', () => toggleTracking($('#trackOn').checked));
+$('#markupView').addEventListener('change', () => tracker.setView($('#markupView').value));
+$('#changeNext').addEventListener('click', () => tracker.step(1));
+$('#changePrev').addEventListener('click', () => tracker.step(-1));
+$('#acceptAll').addEventListener('click', () => { const n = tracker.acceptAll(); if (n) toast(`Accepted ${n} change${n === 1 ? '' : 's'}`); });
+$('#rejectAll').addEventListener('click', async () => {
+  const n = tracker.hunks.length;
+  if (!n || !(await confirmDialog(`Reject all ${n} change${n === 1 ? '' : 's'} and go back to the text as it was when tracking started? Cmd+Z undoes this.`))) return;
+  tracker.rejectAll();
+  toast(`Rejected ${n} change${n === 1 ? '' : 's'}`);
+});
+$('#changeList').addEventListener('keydown', (e) => {
+  const li = e.target.closest('[data-hunk]');
+  if (!li) return;
+  if (e.key === 'Enter') { e.preventDefault(); tracker.select(li.dataset.hunk, { reveal: true }); }
+  if (e.key.toLowerCase() === 'a' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); tracker.accept(li.dataset.hunk); $('#changeList [data-hunk].active')?.focus(); }
+  if (e.key.toLowerCase() === 'r' && !e.metaKey && !e.ctrlKey) { e.preventDefault(); tracker.reject(li.dataset.hunk); $('#changeList [data-hunk].active')?.focus(); }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); (e.key === 'ArrowDown' ? li.nextElementSibling : li.previousElementSibling)?.focus(); }
+});
+
+// ---------- Word choice ----------
+
+wordChoice.addEventListener('applied', (e) => toast(`Changed to "${e.detail}". Cmd+Z to undo.`));
+document.addEventListener('mousedown', (e) => { if (!$('#choicePop').hidden && !e.target.closest('#choicePop')) wordChoice.hide(); });
+
+// ---------- Selection word count ----------
+
+let selCountTimer = null;
+editor.addEventListener('selection', () => {
+  clearTimeout(selCountTimer);
+  selCountTimer = setTimeout(() => {
+    const n = editor.selectionWordCount();
+    if (n) $('#docStats').textContent = `${n.toLocaleString('en-CA')} of ${computeBurstinessStats(editor.paragraphs).wordCount.toLocaleString('en-CA')} words selected`;
+    else if ($('#docStats').dataset.sel) refreshDerived();
+    $('#docStats').dataset.sel = n ? '1' : '';
+  }, 150);
+});
+
 // ---------- Find and focus ----------
 
 $('#findToggle').addEventListener('click', () => (finder.isOpen ? finder.close() : finder.open()));
@@ -1187,8 +1298,9 @@ exportMenu.addEventListener('click', async (e) => {
   const a = e.target.closest('[data-export]');
   if (!a) return;
   await flushSave();
-  const fmt = a.dataset.export === 'docx-clean' ? 'docx' : a.dataset.export;
-  const clean = a.dataset.export === 'docx-clean' ? '&comments=0' : '';
+  const kind = a.dataset.export;
+  const fmt = kind.startsWith('docx') ? 'docx' : kind;
+  const clean = kind === 'docx-clean' ? '&comments=0&changes=0' : kind === 'docx-final' ? '&changes=0' : '';
   const url = `/api/documents/${state.doc.id}/export?format=${fmt}${clean}${fmt === 'mp3' ? `&voice=${encodeURIComponent($('#voiceSelect').value)}` : ''}`;
   if (fmt === 'mp3') toast('Preparing audio. This can take a minute for long documents.');
   const link = document.createElement('a');
@@ -1319,7 +1431,10 @@ window.addEventListener('keydown', (e) => {
     if (s) { e.preventDefault(); handleSuggestion(s.id, 'accept'); }
     return;
   }
+  if (mod && e.shiftKey && e.code === 'KeyE') { e.preventDefault(); toggleTracking(); return; }
   if (e.key === 'Escape') {
+    if (!$('#choicePop').hidden) { wordChoice.hide(); return; }
+    if (tracker.view === 'all' && !typing) { tracker.setView('simple'); return; }
     if (!$('#issuePop').hidden) { language.hide(); return; }
     if (finder.isOpen) { finder.close(); return; }
     if (!selBar.hidden) { selBar.hidden = true; return; }

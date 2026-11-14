@@ -55,6 +55,7 @@ export class Editor extends EventTarget {
     this.groups = null; // check groups that are on; null means all
     this.layers = {}; // extra highlight layers: name -> [{ index, start, end, expect }]
     this.commentCounts = {}; // paraId -> open comment count
+    this.paraMarks = {}; // paraId -> 'changed' | 'inserted' (tracked changes margin bar)
     this.currentIndex = 0;
     this.root.contentEditable = PLAINTEXT_OK ? 'plaintext-only' : 'true';
     this.root.spellcheck = true;
@@ -97,6 +98,8 @@ export class Editor extends EventTarget {
       div.dataset.id = p.id;
       div.dataset.placeholder = i === 0 ? 'Start writing, or paste your draft' : '';
       div.textContent = p.text;
+      // An empty block needs a <br> or the browser cannot put the caret in it.
+      if (!p.text) { div.appendChild(document.createElement('br')); div.classList.add('is-empty'); }
       frag.appendChild(div);
       const sugg = this.suggestions.find((s) => s.paraId === p.id);
       if (sugg) frag.appendChild(this.buildInlineSuggestion(sugg));
@@ -104,6 +107,7 @@ export class Editor extends EventTarget {
     this.root.replaceChildren(frag);
     this.markCurrent(this.currentIndex);
     this.applyCommentCounts();
+    this.applyParaMarks();
     this.refreshFlags();
   }
 
@@ -145,6 +149,7 @@ export class Editor extends EventTarget {
       // Rich-text fallback can insert <br>; keep plain text only.
       if (!PLAINTEXT_OK && el.querySelector('*')) el.textContent = el.textContent;
       const old = this.paragraphs.find((p) => p.id === id);
+      el.classList.toggle('is-empty', !el.textContent);
       next.push({ id, type: el.classList.contains('heading') ? 'heading' : old?.type || 'body', text: el.textContent.replace(/\n+$/, '') });
     }
     if (!next.length) {
@@ -328,6 +333,59 @@ export class Editor extends EventTarget {
       if (n) el.dataset.comments = String(n);
       else delete el.dataset.comments;
     });
+  }
+
+  setParaMarks(marks = {}) {
+    this.paraMarks = marks;
+    this.applyParaMarks();
+  }
+
+  applyParaMarks() {
+    this.root.querySelectorAll(':scope > .para').forEach((el) => {
+      const m = this.paraMarks[el.dataset.id];
+      if (m) el.dataset.track = m;
+      else delete el.dataset.track;
+    });
+  }
+
+  /** Replace the whole paragraph list in one undo step (reject all, restore). */
+  setParagraphs(next, { caret = null } = {}) {
+    this.pushUndo();
+    this.paragraphs = next.map((p) => ({ id: p.id || uid(), type: p.type === 'heading' ? 'heading' : 'body', text: p.text || '' }));
+    if (!this.paragraphs.length) this.paragraphs = [{ id: uid(), type: 'body', text: '' }];
+    this.render();
+    if (caret) this.setCaret(caret.index, caret.offset, { focus: false });
+    this.emitChange();
+  }
+
+  /** Move the paragraph with the caret (or the selected paragraphs) up or down one place. */
+  moveParagraph(dir) {
+    const sel = document.getSelection();
+    let first = this.getCaret()?.index ?? this.currentIndex;
+    let last = first;
+    if (sel && !sel.isCollapsed && sel.rangeCount) {
+      const r = sel.getRangeAt(0);
+      const a = (r.startContainer.nodeType === 1 ? r.startContainer : r.startContainer.parentElement)?.closest('.para');
+      const b = (r.endContainer.nodeType === 1 ? r.endContainer : r.endContainer.parentElement)?.closest('.para');
+      if (a && b) { first = this.indexOfEl(a); last = this.indexOfEl(b); }
+    }
+    if (first < 0 || last < 0) return false;
+    if ((dir < 0 && first === 0) || (dir > 0 && last >= this.paragraphs.length - 1)) return false;
+    const caret = this.getCaret();
+    this.pushUndo();
+    const block = this.paragraphs.splice(first, last - first + 1);
+    this.paragraphs.splice(first + dir, 0, ...block);
+    this.render();
+    if (caret) this.setCaret(caret.index + dir, caret.offset);
+    this.emitChange();
+    return true;
+  }
+
+  /** Words in the current selection, across paragraphs. */
+  selectionWordCount() {
+    const sel = document.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount || !this.root.contains(sel.anchorNode)) return 0;
+    return sel.toString().split(/\s+/).filter(Boolean).length;
   }
 
   /** Replace every match of a pattern in one undo step. Returns the number of replacements. */
@@ -574,6 +632,10 @@ export class Editor extends EventTarget {
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         this.redo();
+      } else if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        // Word's shortcut for moving a paragraph.
+        e.preventDefault();
+        this.moveParagraph(e.key === 'ArrowUp' ? -1 : 1);
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') {
         e.preventDefault();
         this.toggleHeading();

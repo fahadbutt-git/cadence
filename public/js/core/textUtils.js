@@ -256,3 +256,144 @@ export function buildSentenceReadQueue(paragraphs = [], startParaIdx = 0, startS
   });
   return queue;
 }
+
+// ---------- Tracked changes ----------
+// Tracking compares the current text with a baseline captured when tracking started.
+// Tokens keep their trailing whitespace so joining them rebuilds the text exactly.
+
+export function tokenize(text = '') {
+  // Words, spaces and punctuation are separate tokens, so "bank, and more." vs "bank." deletes only ", and more".
+  return String(text).match(/\s+|[\p{L}\p{N}’'_-]+|[^\s\p{L}\p{N}’'_-]+/gu) || [];
+}
+
+function lcsOps(a0, b0) {
+  // Common prefix and suffix are cheap to skip and keep the table small for long paragraphs.
+  let pre = 0;
+  while (pre < a0.length && pre < b0.length && a0[pre] === b0[pre]) pre++;
+  let suf = 0;
+  while (suf < a0.length - pre && suf < b0.length - pre && a0[a0.length - 1 - suf] === b0[b0.length - 1 - suf]) suf++;
+  const head = a0.slice(0, pre).map((t) => ['same', t]);
+  const tail = a0.slice(a0.length - suf).map((t) => ['same', t]);
+  const a = a0.slice(pre, a0.length - suf);
+  const b = b0.slice(pre, b0.length - suf);
+  return [...head, ...lcsCore(a, b), ...tail];
+}
+
+function lcsCore(a, b) {
+  const m = a.length;
+  const n = b.length;
+  // Very long rewrites: fall back to one replacement instead of a huge table.
+  if (m * n > 4e6) return [...a.map((t) => ['del', t]), ...b.map((t) => ['ins', t])];
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? 1 + dp[i + 1][j + 1] : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { ops.push(['same', a[i]]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) ops.push(['del', a[i++]]);
+    else ops.push(['ins', b[j++]]);
+  }
+  while (i < m) ops.push(['del', a[i++]]);
+  while (j < n) ops.push(['ins', b[j++]]);
+  return ops;
+}
+
+/**
+ * Segments of one paragraph: [{ type: 'same' | 'del' | 'ins', text, curStart, curEnd, baseStart, baseEnd }]
+ * curStart/curEnd are offsets in the current text (deletions have zero width there).
+ */
+export function diffSegments(baseText = '', curText = '') {
+  const ops = lcsOps(tokenize(baseText), tokenize(curText));
+  const segs = [];
+  let cur = 0;
+  let base = 0;
+  for (const [type, tok] of ops) {
+    const last = segs[segs.length - 1];
+    const seg = last && last.type === type ? last : null;
+    const s = seg || { type, text: '', curStart: cur, curEnd: cur, baseStart: base, baseEnd: base };
+    s.text += tok;
+    if (type !== 'del') { cur += tok.length; s.curEnd = cur; }
+    if (type !== 'ins') { base += tok.length; s.baseEnd = base; }
+    if (!seg) segs.push(s);
+  }
+  return segs;
+}
+
+/** Group neighbouring deletions and insertions into reviewable changes. */
+export function hunksFromSegments(paraId, segs) {
+  const hunks = [];
+  let h = null;
+  for (const s of segs) {
+    if (s.type === 'same') { h = null; continue; }
+    if (!h) {
+      h = { kind: 'text', paraId, del: '', ins: '', curStart: s.curStart, curEnd: s.curStart, baseStart: s.baseStart, baseEnd: s.baseStart };
+      hunks.push(h);
+    }
+    if (s.type === 'del') { h.del += s.text; h.baseEnd = s.baseEnd; }
+    else { h.ins += s.text; h.curEnd = s.curEnd; }
+  }
+  for (const x of hunks) x.id = `${paraId}:${x.baseStart}:${x.curStart}`;
+  return hunks;
+}
+
+/**
+ * Compare baseline and current paragraph lists ({ id, text }).
+ * Returns { paragraphs: [{ id, index, status, segments }], deleted: [{ id, text, afterId }], hunks: [...] } in document order.
+ */
+export function trackChanges(baseline = [], current = []) {
+  const baseById = new Map(baseline.map((p, i) => [p.id, { ...p, i }]));
+  const curIds = new Set(current.map((p) => p.id));
+  const paragraphs = [];
+  const hunks = [];
+  // Deleted baseline paragraphs, attached after the nearest earlier paragraph that still exists.
+  const deleted = [];
+  let lastKept = null;
+  for (const b of baseline) {
+    if (curIds.has(b.id)) { lastKept = b.id; continue; }
+    deleted.push({ id: b.id, text: b.text, afterId: lastKept, type: b.type });
+  }
+  const pushDeletedAfter = (afterId) => {
+    for (const d of deleted.filter((x) => x.afterId === afterId)) {
+      if (d.text.trim()) hunks.push({ kind: 'para-del', id: `del:${d.id}`, paraId: d.id, del: d.text, ins: '', afterId });
+    }
+  };
+  pushDeletedAfter(null);
+  current.forEach((p, index) => {
+    const b = baseById.get(p.id);
+    if (!b) {
+      paragraphs.push({ id: p.id, index, status: 'inserted', segments: p.text ? [{ type: 'ins', text: p.text, curStart: 0, curEnd: p.text.length, baseStart: 0, baseEnd: 0 }] : [] });
+      if (p.text.trim()) hunks.push({ kind: 'para-ins', id: `ins:${p.id}`, paraId: p.id, del: '', ins: p.text, curStart: 0, curEnd: p.text.length });
+    } else if (b.text === p.text) {
+      paragraphs.push({ id: p.id, index, status: 'same', segments: p.text ? [{ type: 'same', text: p.text, curStart: 0, curEnd: p.text.length, baseStart: 0, baseEnd: p.text.length }] : [] });
+    } else {
+      const segments = diffSegments(b.text, p.text);
+      paragraphs.push({ id: p.id, index, status: 'changed', segments });
+      hunks.push(...hunksFromSegments(p.id, segments));
+    }
+    pushDeletedAfter(p.id);
+  });
+  return { paragraphs, deleted, hunks };
+}
+
+/** Accepting a text change moves the baseline to the new wording for that span. */
+export function acceptHunkInBaseline(baseline, hunk, current) {
+  const out = baseline.map((p) => ({ ...p }));
+  if (hunk.kind === 'text') {
+    const b = out.find((p) => p.id === hunk.paraId);
+    if (b) b.text = b.text.slice(0, hunk.baseStart) + hunk.ins + b.text.slice(hunk.baseEnd);
+  } else if (hunk.kind === 'para-del') {
+    return out.filter((p) => p.id !== hunk.paraId);
+  } else if (hunk.kind === 'para-ins') {
+    const curIndex = current.findIndex((p) => p.id === hunk.paraId);
+    const prevIds = current.slice(0, curIndex).map((p) => p.id).reverse();
+    const anchor = prevIds.find((id) => out.some((p) => p.id === id));
+    const at = anchor ? out.findIndex((p) => p.id === anchor) + 1 : 0;
+    out.splice(at, 0, { ...current[curIndex] });
+  }
+  return out;
+}

@@ -47,6 +47,9 @@ npm run app          # development build of the app, runs from this folder
 - **Comments.** Leave notes on the whole document, a paragraph or a phrase (Comments tab, the selection toolbar, Cmd+Option+M, or say "comment ..." while Talk is on). Get editor feedback adds mentor-style comments for you. Suggest edit turns a comment into a proposed change. Word export keeps them as real Word comments.
 - **Spelling and grammar** are checked on this Mac with [Harper](https://writewithharper.com) in Canadian English. Click an underline for fixes. Add names and terms to your dictionary.
 - **Checks** also covers stock AI phrasing (dashes, semicolons, contrast frames, "-ing" tails), clarity (long sentences, passive voice, adverbs, fillers, hedges) and style (clichés, repeated words, repeated openings), with a reading grade level. Each group can be switched off.
+- **Track changes** (Cmd+Shift+E, or the Track changes button). Edits from then on are recorded. The Changes tab lists them with Accept and Reject, Previous and Next, and Accept all or Reject all. Switch between Simple markup, All markup and No markup. Word export writes them as real tracked changes.
+- **Word choice.** Select a word and choose Synonyms, or select a sentence and choose Reword for three alternatives.
+- **Word files in and out.** Importing a .docx keeps its comments. Exporting keeps comments and tracked changes, or gives a copy with changes accepted, or a clean copy.
 - **Find and replace** (Cmd+F), **focus mode** (Cmd+Shift+F), and **compare** any saved version with the current draft.
 - History keeps saved versions. Restoring one saves the current text first.
 - Export as Word (.docx, Arial or Times New Roman 12 pt, double spaced, no author metadata), Markdown, or an MP3 of the whole document. Exports go to Downloads.
@@ -71,6 +74,9 @@ npm run app          # development build of the app, runs from this folder
 | Cmd+Enter | Accept the suggestion for this paragraph |
 | Cmd+Z, Cmd+Shift+Z | Undo, redo |
 | Cmd+Shift+H | Toggle heading |
+| Cmd+Shift+E | Track changes on or off |
+| Option+Shift+Up or Down | Move the paragraph up or down |
+| A or R in the Changes list | Accept or reject the focused change |
 | Cmd+\\ | Show or hide the panel |
 | Cmd+N, Cmd+O, Cmd+, | New, import, settings |
 

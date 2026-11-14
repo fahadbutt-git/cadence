@@ -365,3 +365,125 @@ test('HTTP API: config, documents, edit, tts, export and import', async () => {
     server.close();
   }
 });
+
+// ---------- 3.3: track changes, Word round trip, word choice ----------
+
+test('trackChanges finds word, paragraph insert and paragraph delete changes', () => {
+  const base = [{ id: 'a', text: 'We utilized the lamp to see.' }, { id: 'b', text: 'Old paragraph goes.' }, { id: 'c', text: 'Keep me.' }];
+  const cur = [{ id: 'a', text: 'We used the slit lamp to see clearly.' }, { id: 'c', text: 'Keep me.' }, { id: 'd', text: 'Brand new.' }];
+  const r = text.trackChanges(base, cur);
+  assert.deepEqual(r.hunks.map((h) => [h.kind, h.del, h.ins]), [
+    ['text', 'utilized', 'used'],
+    ['text', '', 'slit '],
+    ['text', '', ' clearly'],
+    ['para-del', 'Old paragraph goes.', ''],
+    ['para-ins', '', 'Brand new.'],
+  ]);
+  const segs = r.paragraphs[0].segments;
+  assert.equal(segs.filter((s) => s.type !== 'del').map((s) => s.text).join(''), cur[0].text);
+  assert.equal(segs.filter((s) => s.type !== 'ins').map((s) => s.text).join(''), base[0].text);
+  for (const h of r.hunks.filter((x) => x.kind === 'text')) assert.equal(cur[0].text.slice(h.curStart, h.curEnd), h.ins);
+});
+
+test('accepting every change one at a time brings the baseline to the current text', () => {
+  const base = [{ id: 'a', text: 'One two three.' }, { id: 'b', text: 'Gone.' }];
+  const cur = [{ id: 'x', text: 'New first.' }, { id: 'a', text: 'One three four.' }];
+  let b = base;
+  for (let i = 0; i < 10; i++) {
+    const hs = text.trackChanges(b, cur).hunks;
+    if (!hs.length) break;
+    b = text.acceptHunkInBaseline(b, hs[0], cur);
+  }
+  assert.deepEqual(b, cur);
+  assert.equal(text.trackChanges(cur, cur).hunks.length, 0);
+});
+
+test('Word export writes tracked changes and comments that import back', async () => {
+  const JSZip = (await import('jszip')).default;
+  const baseline = [{ id: 'a', type: 'body', text: 'We utilized the lamp.' }, { id: 'b', type: 'body', text: 'Old paragraph.' }];
+  const paragraphs = [{ id: 'a', type: 'body', text: 'We used the slit lamp.' }, { id: 'd', type: 'body', text: 'Brand new.' }];
+  const comments = [
+    { id: 'c1', paraId: 'a', quote: 'slit lamp', text: 'Name the exam.' },
+    { id: 'c2', paraId: null, text: 'Needs a conclusion.' },
+  ];
+  const buf = await repo.generateCleanDocxBuffer({ paragraphs, baseline, comments, author: 'Reviewer' });
+  const xml = await (await JSZip.loadAsync(buf)).file('word/document.xml').async('string');
+  assert.ok((xml.match(/<w:ins /g) || []).length >= 3);
+  assert.ok(xml.includes('<w:delText'));
+  assert.ok(xml.includes('utilized'));
+  const plain = await repo.generateCleanDocxBuffer({ paragraphs, comments: [] });
+  assert.ok(!(await (await JSZip.loadAsync(plain)).file('word/document.xml').async('string')).includes('<w:ins '));
+
+  const found = repo.commentsForParagraphs(await repo.extractDocxComments(buf), paragraphs);
+  assert.deepEqual(found.map((c) => [c.paraId, c.quote, c.text]), [['a', 'slit lamp', 'Name the exam.'], [null, '', 'Needs a conclusion.']]);
+});
+
+test('documents keep tracking state and report pending changes', () => {
+  const doc = repo.upsertDocument({ title: 'Tracked', paragraphs: [{ id: 'p1', text: 'New words.' }], tracking: { on: true, baseline: [{ id: 'p1', text: 'Old words.' }], startedAt: '2026-11-01T00:00:00Z' } });
+  assert.equal(doc.tracking.on, true);
+  const meta = repo.computeDocumentMetadata(doc);
+  assert.equal(meta.pendingChanges, 1);
+  const again = repo.upsertDocument({ id: doc.id, paragraphs: doc.paragraphs });
+  assert.equal(again.tracking.baseline[0].text, 'Old words.');
+  assert.deepEqual(repo.sanitizeTracking(null), { on: false, baseline: null, startedAt: null });
+});
+
+test('synonyms use context, keep capitalization and fail softly offline', async () => {
+  const thesaurus = await import('../src/main/domains/language/thesaurusService.js');
+  let url = '';
+  const fake = async (u) => { url = u; return { ok: true, json: async () => [{ word: 'used' }, { word: 'employed' }, { word: 'Utilized' }, { word: 'used' }] }; };
+  const r = await thesaurus.findSynonyms({ word: 'Utilized', left: 'We', right: 'the lamp', fetchImpl: fake });
+  assert.deepEqual(r.options, ['Used', 'Employed']);
+  assert.match(url, /ml=Utilized/);
+  assert.match(url, /lc=We/);
+  assert.match(url, /rc=the/);
+  const down = await thesaurus.findSynonyms({ word: 'cold', fetchImpl: async () => { throw new Error('offline'); } });
+  assert.deepEqual(down.options, []);
+  assert.ok(down.error);
+  assert.equal(thesaurus.matchCase('NHS', 'service'), 'SERVICE');
+});
+
+test('rewording alternatives need a key and parse three options', async () => {
+  const off = await editorial.generateAlternatives({ targetText: 'This is a sentence.' });
+  assert.deepEqual(off.options, []);
+  assert.ok(off.message);
+  const client = { interactions: { create: async () => ({ output_text: JSON.stringify({ options: [{ text: 'A plainer one.', label: 'Plainer' }, { text: 'This is a sentence.', label: 'Same' }, { text: 'Short.', label: 'Shorter' }] }) }) } };
+  const on = await editorial.generateAlternatives({ targetText: 'This is a sentence.', client });
+  assert.deepEqual(on.options.map((o) => o.text), ['A plainer one.', 'Short.']);
+});
+
+test('voice commands cover tracked changes', () => {
+  assert.equal(voice.parseCommand('next change').type, 'nextChange');
+  assert.equal(voice.parseCommand('accept all changes').type, 'acceptAllChanges');
+  assert.equal(voice.parseCommand('turn on track changes').type, 'trackOn');
+  assert.equal(voice.parseCommand('stop tracking').type, 'trackOff');
+  assert.equal(voice.parseCommand('accept').type, 'accept');
+});
+
+test('HTTP API: synonyms, alternatives, Word import with comments, tracked export', async () => {
+  const thesaurus = async ({ word }) => ({ word, options: ['used'], source: 'test' });
+  const server = createApp({ thesaurus, grammar: async () => [] }).listen(0);
+  const base = `http://127.0.0.1:${server.address().port}/api`;
+  try {
+    assert.deepEqual((await (await fetch(`${base}/synonyms?word=utilized`)).json()).options, ['used']);
+    const alt = await (await fetch(`${base}/alternatives`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ targetText: 'A sentence here.' }) })).json();
+    assert.deepEqual(alt.options, []);
+
+    const buf = await repo.generateCleanDocxBuffer({ paragraphs: [{ id: 'a', type: 'body', text: 'First paragraph here.' }, { id: 'b', type: 'body', text: 'Second one.' }], comments: [{ id: 'c1', paraId: 'b', quote: 'Second', text: 'Why second?' }] });
+    const fd = new FormData();
+    fd.append('file', new Blob([buf]), 'Statement.docx');
+    const doc = await (await fetch(`${base}/import`, { method: 'POST', body: fd })).json();
+    assert.equal(doc.comments.length, 1);
+    assert.equal(doc.comments[0].paraId, doc.paragraphs[1].id);
+    assert.equal(doc.comments[0].quote, 'Second');
+
+    const tracked = await (await fetch(`${base}/documents`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'T', paragraphs: [{ id: 'p', text: 'New text.' }], tracking: { on: true, baseline: [{ id: 'p', text: 'Old text.' }] } }) })).json();
+    const JSZip = (await import('jszip')).default;
+    const withChanges = Buffer.from(await (await fetch(`${base}/documents/${tracked.id}/export?format=docx`)).arrayBuffer());
+    const accepted = Buffer.from(await (await fetch(`${base}/documents/${tracked.id}/export?format=docx&changes=0`)).arrayBuffer());
+    assert.ok((await (await JSZip.loadAsync(withChanges)).file('word/document.xml').async('string')).includes('<w:delText'));
+    assert.ok(!(await (await JSZip.loadAsync(accepted)).file('word/document.xml').async('string')).includes('<w:delText'));
+  } finally {
+    server.close();
+  }
+});

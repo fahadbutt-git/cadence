@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.3.0
+
+- Track changes (Cmd+Shift+E), like Word's Track Changes and Google Docs' Suggesting mode. Every edit after you turn it on, typed, dictated or accepted from a suggestion, becomes a change you can accept or reject one at a time or all at once. Step through them with Previous and Next, or by voice ("next change", "accept", "reject", "accept all changes").
+- Three views: Simple markup (insertions underlined, a bar beside changed paragraphs), All markup (deletions struck through, read only), and No markup.
+- Word export writes your edits as real tracked changes under your reviewer name, with comments. Your reader can accept or reject them in Word. Export menu also has a copy with changes accepted, and a clean copy.
+- Importing a Word file brings its comments in, anchored to the same paragraph and phrase.
+- Synonyms for a selected word, ranked by the words around it, and three rewordings of a selected sentence (rewordings need a Gemini key).
+- Move a paragraph up or down with Option+Shift+Up or Down, as in Word.
+- Word count of the selection in the top bar.
+- Fixed typing into a new empty paragraph at the end of a document, which used to add the text to the paragraph above.
+
 ## 3.2.0
 
 - Comments: notes on the whole document, a paragraph, or a selected phrase. Add them from the Comments tab, the selection toolbar, Cmd+Option+M, or by voice ("comment ...", "general comment ..."). Margin counts show where they are. Resolve, reopen, delete, or turn one into a suggested edit.

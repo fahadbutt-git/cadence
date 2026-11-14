@@ -17,7 +17,8 @@ import {
 import { synthesizeSpeech, synthesizeDocumentMp3 } from '../domains/voice/ttsService.js';
 import { runForensicAuditReport } from '../domains/forensics/forensicsService.js';
 import { checkParagraphs } from '../domains/language/grammarService.js';
-import { generateEditorialRevision, generateReview } from '../domains/editorial/editorialService.js';
+import { generateEditorialRevision, generateReview, generateAlternatives } from '../domains/editorial/editorialService.js';
+import { findSynonyms } from '../domains/language/thesaurusService.js';
 
 const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 25 * 1024 * 1024 } });
 const fileSafe = (s = 'Document') => String(s).replace(/[^\w .-]+/g, '').trim().replace(/\s+/g, '_') || 'Document';
@@ -26,7 +27,7 @@ const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => 
   res.status(err.status || 500).json({ error: err.message || 'Request failed' });
 });
 
-export function createApiRouter({ tts = synthesizeSpeech, editor = generateEditorialRevision, reviewer = generateReview, grammar = checkParagraphs } = {}) {
+export function createApiRouter({ tts = synthesizeSpeech, editor = generateEditorialRevision, reviewer = generateReview, grammar = checkParagraphs, thesaurus = findSynonyms, alternatives = generateAlternatives } = {}) {
   const router = express.Router();
 
   router.get('/health', (req, res) => res.json({ ok: true }));
@@ -108,6 +109,8 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
       doubleSpaced: true,
       comments: req.query.comments === '0' ? [] : doc.comments || [],
       author: getConfig().reviewerName || 'Reviewer',
+      baseline: req.query.changes === '0' ? null : doc.tracking?.baseline || null,
+      changesDate: doc.tracking?.startedAt,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${name}.docx"`);
@@ -188,6 +191,18 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     const cfg = getConfig();
     const paragraphs = (req.body?.paragraphs || []).map((p) => ({ type: p.type === 'heading' ? 'heading' : 'body', text: String(p.text || '') }));
     res.json(await reviewer({ apiKey: cfg.apiKey, model: cfg.textModel, paragraphs, style: req.body?.style || 'narrative' }));
+  }));
+
+  // Word alternatives for one word, using the words either side for context.
+  router.get('/synonyms', wrap(async (req, res) => {
+    res.json(await thesaurus({ word: String(req.query.word || ''), left: String(req.query.left || ''), right: String(req.query.right || '') }));
+  }));
+
+  // Several rewordings of a sentence or phrase to choose from.
+  router.post('/alternatives', wrap(async (req, res) => {
+    const cfg = getConfig();
+    const b = req.body || {};
+    res.json(await alternatives({ apiKey: cfg.apiKey, model: cfg.textModel, targetText: String(b.targetText || ''), contextText: String(b.contextText || ''), style: b.style || 'narrative' }));
   }));
 
   return router;

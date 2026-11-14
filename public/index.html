@@ -63,12 +63,14 @@
         <div class="menu-wrap">
           <button class="btn" id="exportBtn" type="button" aria-haspopup="menu" aria-expanded="false">Export</button>
           <div class="menu" id="exportMenu" role="menu" hidden>
-            <a role="menuitem" data-export="docx">Word document with comments (.docx)</a>
+            <a role="menuitem" data-export="docx">Word document with comments and tracked changes (.docx)</a>
+            <a role="menuitem" data-export="docx-final">Word document with comments, changes accepted (.docx)</a>
             <a role="menuitem" data-export="docx-clean">Word document, clean copy (.docx)</a>
             <a role="menuitem" data-export="md">Markdown (.md)</a>
             <a role="menuitem" data-export="mp3">Audio of whole document (.mp3)</a>
           </div>
         </div>
+        <button class="btn track-btn" id="trackToggle" type="button" aria-pressed="false" title="Track changes: record edits so each one can be accepted or rejected (Cmd+Shift+E)">Track changes</button>
         <button class="icon-btn" id="findToggle" type="button" aria-label="Find and replace" title="Find and replace (Cmd+F)">
           <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4.5 4.5"/></svg>
         </button>
@@ -98,6 +100,7 @@
           <button class="icon-btn" id="findClose" type="button" aria-label="Close find" title="Close (Escape)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"/></svg></button>
         </div>
         <article id="paper" class="paper" aria-label="Document text"></article>
+        <article id="markup" class="paper markup" aria-label="Document with all changes shown" hidden></article>
         <div id="caption" class="caption" role="status" aria-live="polite" hidden>
           <span id="captionWho" class="who"></span>
           <span id="captionText"></span>
@@ -108,6 +111,7 @@
         <div class="tabs" role="tablist">
           <button role="tab" class="tab" aria-selected="true" data-tab="edit">Edit</button>
           <button role="tab" class="tab" aria-selected="false" data-tab="comments">Comments <span id="commentCount" class="count neutral" hidden></span></button>
+          <button role="tab" class="tab" aria-selected="false" data-tab="changes">Changes <span id="changeCount" class="count info" hidden></span></button>
           <button role="tab" class="tab" aria-selected="false" data-tab="checks">Checks <span id="flagCount" class="count" hidden></span></button>
           <button role="tab" class="tab" aria-selected="false" data-tab="history">History</button>
         </div>
@@ -152,6 +156,29 @@
           </div>
           <ul id="commentList" class="comments"></ul>
           <p id="commentsEmpty" class="muted small">No comments yet. Select text and choose Comment, write one above, or say "comment" followed by your note while Talk is on.</p>
+        </div>
+
+        <div class="tabpanel" data-panel="changes" hidden>
+          <div class="row between track-row">
+            <label class="toggle"><input type="checkbox" id="trackOn" /> <span>Track changes</span></label>
+            <select id="markupView" aria-label="How changes are shown">
+              <option value="simple">Simple markup</option>
+              <option value="all">All markup</option>
+              <option value="none">No markup</option>
+            </select>
+          </div>
+          <div class="row between change-tools">
+            <span class="row">
+              <button class="btn" id="changePrev" type="button" title="Previous change">Previous</button>
+              <button class="btn" id="changeNext" type="button" title="Next change">Next</button>
+            </span>
+            <span class="row">
+              <button class="btn subtle" id="rejectAll" type="button">Reject all</button>
+              <button class="btn" id="acceptAll" type="button">Accept all</button>
+            </span>
+          </div>
+          <ul id="changeList" class="changes"></ul>
+          <p id="changesEmpty" class="muted small"></p>
         </div>
 
         <div class="tabpanel" data-panel="checks" hidden>
@@ -239,9 +266,13 @@
     <button type="button" data-sel="proofread">Proofread</button>
     <button type="button" data-sel="tighten">Tighten</button>
     <button type="button" data-sel="humanize">Clean up</button>
+    <button type="button" data-sel="choice" id="choiceBtn">Synonyms</button>
     <button type="button" data-sel="ask">Rewrite…</button>
     <button type="button" data-sel="heading" title="Toggle heading (Cmd+Shift+H)">Heading</button>
   </div>
+
+  <!-- Synonyms and rewordings -->
+  <div id="choicePop" class="issue-pop choice-pop" role="dialog" aria-label="Word choice" hidden></div>
 
   <!-- Spelling and grammar suggestion -->
   <div id="issuePop" class="issue-pop" role="dialog" aria-label="Suggestion" hidden>

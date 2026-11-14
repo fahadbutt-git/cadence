@@ -88,6 +88,14 @@ export function parseCommand(raw = '') {
   if (whole(/(next|skip|next sentence|skip (this|that)( sentence)?|skip it)/)) return { type: 'next' };
   if (whole(/(back|go back|previous|previous sentence|back one|go back one)/)) return { type: 'prev' };
 
+  // Tracked changes
+  if (whole(/((turn on|start) (tracking|track changes)|track changes( on)?|start tracking changes)/)) return { type: 'trackOn' };
+  if (whole(/((turn off|stop) (tracking|track changes)|track changes off|stop tracking changes)/)) return { type: 'trackOff' };
+  if (whole(/(next change|go to the next change|show me the next change)/)) return { type: 'nextChange' };
+  if (whole(/(previous change|last change|go back a change)/)) return { type: 'prevChange' };
+  if (whole(/(accept all( the)? changes|accept all of them|accept everything)/)) return { type: 'acceptAllChanges' };
+  if (whole(/(reject all( the)? changes|reject all of them|reject everything)/)) return { type: 'rejectAllChanges' };
+
   // Suggestions
   if (whole(/(accept|accept (it|that|this|the change|the suggestion|the edit)|yes|yeah|yep|do it|apply (it|that)|sounds good|looks good|keep (it|that)|perfect|great)/)) return { type: 'accept' };
   if (whole(/(reject|reject (it|that|this)|no|nope|discard( it)?|never ?mind|forget (it|that)|don't|dont|leave it|keep the original)/)) return { type: 'reject' };
@@ -123,4 +131,4 @@ export function parseCommand(raw = '') {
 export const VOICE_HELP =
   'Say continue to keep reading, pause to stop, back or next to move a sentence, go to paragraph three, or start over. ' +
   'To edit, just say what you want, like tighten this sentence or replace pivotal with important. ' +
-  'Then say accept, reject, read it, or undo. To leave a note, say comment followed by the note, or general comment for the whole piece. Say stop listening when you are done.';
+  'Then say accept, reject, read it, or undo. With track changes on, say next change, accept or reject, or accept all changes. To leave a note, say comment followed by the note, or general comment for the whole piece. Say stop listening when you are done.';

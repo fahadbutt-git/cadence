@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import mammoth from 'mammoth';
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, CommentRangeStart, CommentRangeEnd, CommentReference } from 'docx';
+import JSZip from 'jszip';
+import { Document, Packer, Paragraph, TextRun, InsertedTextRun, DeletedTextRun, AlignmentType, HeadingLevel, CommentRangeStart, CommentRangeEnd, CommentReference } from 'docx';
+import { trackChanges } from '../../../../public/js/core/textUtils.js';
 import { DOCS_DIR, REVISIONS_DIR, ensureDataDirectories } from '../config/configService.js';
 
 const MAX_REVISIONS = 40;
@@ -33,6 +35,15 @@ export function sanitizeComments(list = [], paragraphs = []) {
     .slice(0, 1000);
 }
 
+/** Tracked changes: { on, baseline: [{ id, type, text }] | null, startedAt }. */
+export function sanitizeTracking(raw) {
+  if (!raw || typeof raw !== 'object') return { on: false, baseline: null, startedAt: null };
+  const baseline = Array.isArray(raw.baseline)
+    ? raw.baseline.slice(0, 20000).map((p) => ({ id: String(p.id || uid()), type: p.type === 'heading' ? 'heading' : 'body', text: String(p.text ?? '') }))
+    : null;
+  return { on: Boolean(raw.on), baseline, startedAt: raw.startedAt || null };
+}
+
 export function computeWordCount(paragraphs = []) {
   return paragraphs.map((p) => (p.text || '').trim()).join(' ').split(/\s+/).filter(Boolean).length;
 }
@@ -60,6 +71,8 @@ export function computeDocumentMetadata(raw) {
     },
     progressPct: paragraphs.length ? Math.min(100, Math.round((paraIndex / paragraphs.length) * 100)) : 0,
     openComments: (raw.comments || []).filter((c) => !c.resolved).length,
+    tracking: Boolean(raw.tracking?.on),
+    pendingChanges: raw.tracking?.baseline ? trackChanges(raw.tracking.baseline, paragraphs).hunks.length : 0,
   };
 }
 
@@ -147,6 +160,7 @@ export function upsertDocument(payload = {}, docsDir = DOCS_DIR, revisionsDir = 
     paragraphs: paragraphs.length ? paragraphs : [{ id: uid(), type: 'body', text: '' }],
   };
   doc.comments = sanitizeComments(payload.comments !== undefined ? payload.comments : existing?.comments || [], doc.paragraphs);
+  doc.tracking = sanitizeTracking(payload.tracking !== undefined ? payload.tracking : existing?.tracking);
   writeJson(file, doc);
   if (payload.createSnapshot) saveSnapshot(doc, payload.snapshotReason || 'Checkpoint', revisionsDir);
   return doc;
@@ -210,9 +224,15 @@ export function paragraphsFromText(raw = '') {
 export async function importDocumentFromFile(filePath, originalName, docsDir = DOCS_DIR, revisionsDir = REVISIONS_DIR) {
   const ext = path.extname(originalName).toLowerCase();
   let paragraphs;
+  let comments = [];
   if (ext === '.docx') {
     const { value } = await mammoth.convertToHtml({ path: filePath });
     paragraphs = paragraphsFromHtml(value);
+    try {
+      comments = commentsForParagraphs(await extractDocxComments(fs.readFileSync(filePath)), paragraphs);
+    } catch (e) {
+      comments = [];
+    }
   } else if (['.txt', '.md', '.markdown'].includes(ext)) {
     paragraphs = paragraphsFromText(fs.readFileSync(filePath, 'utf8'));
   } else {
@@ -223,6 +243,7 @@ export async function importDocumentFromFile(filePath, originalName, docsDir = D
       title: path.basename(originalName, ext),
       style: 'narrative',
       paragraphs: paragraphs.length ? paragraphs : [{ id: uid(), type: 'body', text: '' }],
+      comments,
       createSnapshot: true,
       snapshotReason: `Imported ${originalName}`,
     },
@@ -239,45 +260,88 @@ export function commentRanges(text = '', comments = []) {
   });
 }
 
-function runsWithComments(text, ranges, idOf, run) {
-  if (!ranges.length) return [run(text)];
-  const cuts = [...new Set([0, text.length, ...ranges.flatMap((r) => [r.start, r.end])])].sort((x, y) => x - y);
+/**
+ * Runs for one paragraph. segments come from diffSegments (offsets in the current text); deleted
+ * segments have zero width. Comment ranges use current-text offsets.
+ */
+function buildRuns(text, segments, ranges, idOf, mk) {
   const out = [];
-  for (let i = 0; i < cuts.length; i++) {
-    const at = cuts[i];
+  const done = new Set();
+  const markers = (at) => {
+    if (done.has(at)) return;
+    done.add(at);
     for (const r of ranges.filter((x) => x.end === at && x.start !== at)) {
       out.push(new CommentRangeEnd(idOf(r.c)));
       out.push(new TextRun({ children: [new CommentReference(idOf(r.c))] }));
     }
     for (const r of ranges.filter((x) => x.start === at)) out.push(new CommentRangeStart(idOf(r.c)));
-    // Zero-length range (empty paragraph): close it straight away.
     for (const r of ranges.filter((x) => x.start === at && x.end === at)) {
       out.push(new CommentRangeEnd(idOf(r.c)));
       out.push(new TextRun({ children: [new CommentReference(idOf(r.c))] }));
     }
-    if (i < cuts.length - 1 && cuts[i + 1] > at) out.push(run(text.slice(at, cuts[i + 1])));
+  };
+  const cuts = [...new Set([0, text.length, ...ranges.flatMap((r) => [r.start, r.end])])].sort((a, b) => a - b);
+  const segs = segments && segments.length ? segments : text ? [{ type: 'same', text, curStart: 0, curEnd: text.length }] : [];
+  for (const seg of segs) {
+    if (seg.type === 'del') {
+      markers(seg.curStart);
+      out.push(mk(seg.text, 'del'));
+      continue;
+    }
+    const points = [seg.curStart, ...cuts.filter((c) => c > seg.curStart && c < seg.curEnd), seg.curEnd];
+    for (let i = 0; i < points.length - 1; i++) {
+      markers(points[i]);
+      out.push(mk(text.slice(points[i], points[i + 1]), seg.type));
+    }
   }
+  markers(text.length);
+  for (const at of cuts) markers(at);
   return out;
 }
 
-export async function generateCleanDocxBuffer({ title = 'Document', paragraphs = [], fontFamily = 'Arial', doubleSpaced = true, comments = [], author = 'Reviewer' }) {
+/**
+ * Word export. With tracking.baseline set and showChanges on, edits since tracking started are
+ * written as real tracked insertions and deletions that the reader can accept or reject in Word.
+ */
+export async function generateCleanDocxBuffer({ title = 'Document', paragraphs = [], fontFamily = 'Arial', doubleSpaced = true, comments = [], author = 'Reviewer', baseline = null, changesDate = null }) {
   const line = doubleSpaced ? 480 : 276;
   const open = (comments || []).filter((c) => c && c.text && !c.resolved);
   const ids = new Map(open.map((c, i) => [c.id, i]));
   const idOf = (c) => ids.get(c.id);
   const firstId = paragraphs[0]?.id;
-  const children = paragraphs.map((p) => {
+  const who = author || 'Reviewer';
+  const date = new Date(changesDate || Date.now()).toISOString().replace(/\.\d+Z$/, 'Z');
+  let rev = 1000;
+  const tracked = baseline ? trackChanges(baseline, paragraphs) : null;
+  const byId = new Map((tracked?.paragraphs || []).map((p) => [p.id, p]));
+
+  // mark: 'ins' or 'del' tracks the paragraph mark itself, so a whole paragraph appears or goes on accept.
+  const para = (type, kids, mark = null) =>
+    new Paragraph({
+      alignment: AlignmentType.LEFT,
+      heading: type === 'heading' ? HeadingLevel.HEADING_1 : undefined,
+      spacing: { line, after: 0 },
+      run: mark === 'ins' ? { insertion: { id: rev++, author: who, date } } : mark === 'del' ? { deletion: { id: rev++, author: who, date } } : undefined,
+      children: kids,
+    });
+  const runMaker = (type) => (t, kind) => {
+    const props = { text: t, font: fontFamily, size: 24, bold: type === 'heading', color: '000000' };
+    if (kind === 'ins') return new InsertedTextRun({ ...props, id: rev++, author: who, date });
+    if (kind === 'del') return new DeletedTextRun({ ...props, id: rev++, author: who, date });
+    return new TextRun(props);
+  };
+  const deletedAfter = (afterId) =>
+    (tracked?.deleted || []).filter((d) => d.afterId === afterId && d.text.trim()).map((d) => para(d.type, [runMaker(d.type)(d.text, 'del')], 'del'));
+
+  const children = [...deletedAfter(null)];
+  for (const p of paragraphs) {
     const mine = open.filter((c) => c.paraId === p.id || (!c.paraId && p.id === firstId));
     const ranges = commentRanges(p.text || '', mine).map((r) => (r.c.paraId ? r : { ...r, start: 0, end: (p.text || '').length }));
-    const run = (t) => new TextRun({ text: t, font: fontFamily, size: 24, bold: p.type === 'heading', color: '000000' });
-    return new Paragraph({
-      alignment: AlignmentType.LEFT,
-      heading: p.type === 'heading' ? HeadingLevel.HEADING_1 : undefined,
-      spacing: { line, after: 0 },
-      children: runsWithComments(p.text || '', ranges, idOf, run),
-    });
-  });
-  const initials = (author || 'R').split(/\s+/).map((w) => w[0]).join('').slice(0, 3).toUpperCase();
+    const info = byId.get(p.id);
+    children.push(para(p.type, buildRuns(p.text || '', info?.segments, ranges, idOf, runMaker(p.type)), info?.status === 'inserted' ? 'ins' : null));
+    if (tracked) children.push(...deletedAfter(p.id));
+  }
+  const initials = who.split(/\s+/).map((w) => w[0]).join('').slice(0, 3).toUpperCase();
   const doc = new Document({
     creator: '',
     lastModifiedBy: '',
@@ -287,7 +351,7 @@ export async function generateCleanDocxBuffer({ title = 'Document', paragraphs =
     comments: {
       children: open.map((c) => ({
         id: idOf(c),
-        author: author || 'Reviewer',
+        author: who,
         initials,
         date: new Date(c.createdAt || Date.now()),
         children: [new Paragraph({ children: [new TextRun({ text: c.paraId ? c.text : `General comment: ${c.text}` })] })],
@@ -296,6 +360,63 @@ export async function generateCleanDocxBuffer({ title = 'Document', paragraphs =
     sections: [{ properties: {}, children }],
   });
   return Packer.toBuffer(doc);
+}
+
+// ---------- Word comments on import ----------
+
+const xmlText = (s = '') => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+const squash = (s = '') => s.replace(/\s+/g, ' ').trim();
+
+/** Read comments from a .docx: [{ author, text, paraText, quote }]. */
+export async function extractDocxComments(buffer) {
+  const zip = await JSZip.loadAsync(buffer);
+  const commentsXml = await zip.file('word/comments.xml')?.async('string');
+  const docXml = await zip.file('word/document.xml')?.async('string');
+  if (!commentsXml || !docXml) return [];
+  const notes = new Map();
+  for (const m of commentsXml.matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)) {
+    const id = (m[1].match(/w:id="([^"]+)"/) || [])[1];
+    const author = xmlText((m[1].match(/w:author="([^"]*)"/) || [])[1] || '');
+    const paras = [...m[2].matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)].map((p) => [...p[0].matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>/g)].map((t) => xmlText(t[1])).join(''));
+    notes.set(id, { author, text: squash(paras.join(' ')) });
+  }
+  const found = new Map();
+  for (const pm of docXml.matchAll(/<w:p\b[\s\S]*?<\/w:p>/g)) {
+    let text = '';
+    const starts = new Map();
+    const ends = new Map();
+    for (const tok of pm[0].matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>|<w:commentRangeStart\b[^>]*w:id="([^"]+)"|<w:commentRangeEnd\b[^>]*w:id="([^"]+)"|<w:commentReference\b[^>]*w:id="([^"]+)"/g)) {
+      if (tok[1] !== undefined) text += xmlText(tok[1]);
+      else if (tok[2] !== undefined) starts.set(tok[2], text.length);
+      else if (tok[3] !== undefined) ends.set(tok[3], text.length);
+      else if (tok[4] !== undefined && !starts.has(tok[4]) && !found.has(tok[4])) starts.set(tok[4], 0);
+    }
+    for (const [id, s] of starts) {
+      if (found.has(id)) continue;
+      const e = ends.has(id) ? ends.get(id) : text.length;
+      found.set(id, { paraText: text, quote: text.slice(s, e) });
+    }
+  }
+  const out = [];
+  for (const [id, n] of notes) {
+    if (!n.text) continue;
+    const where = found.get(id) || { paraText: '', quote: '' };
+    out.push({ author: n.author, text: n.text, paraText: where.paraText, quote: where.quote });
+  }
+  return out;
+}
+
+/** Attach extracted Word comments to imported paragraphs by matching paragraph text. */
+export function commentsForParagraphs(list = [], paragraphs = []) {
+  const now = new Date().toISOString();
+  return list.map((c) => {
+    const general = /^general comment:\s*/i.test(c.text);
+    const text = c.text.replace(/^general comment:\s*/i, '');
+    const target = squash(c.paraText);
+    const p = !general && target ? paragraphs.find((x) => squash(x.text) === target) || paragraphs.find((x) => target && squash(x.text).includes(target.slice(0, 60))) : null;
+    const quote = p && c.quote && p.text.includes(c.quote) && c.quote.length < p.text.length ? c.quote : '';
+    return { id: uid('c'), paraId: p ? p.id : null, quote, text, createdAt: now, resolved: false };
+  });
 }
 
 export function documentAsMarkdown(doc, { includeComments = true } = {}) {

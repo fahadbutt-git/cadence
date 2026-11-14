@@ -281,3 +281,53 @@ export async function generateReview({ apiKey = '', model = 'gemini-3.8-flash', 
     return { ...local, notice: `Gemini request failed (${err.message}). Showing offline feedback.` };
   }
 }
+
+// ---------- Alternatives: several rewordings to choose from ----------
+
+export async function generateAlternatives({ apiKey = '', model = 'gemini-3.8-flash', targetText = '', contextText = '', style = 'narrative', client = null } = {}) {
+  const target = targetText.trim();
+  if (!target) throw Object.assign(new Error('Select a sentence or phrase first'), { status: 400 });
+  if (!apiKey.trim() && !client) {
+    return { options: [], source: 'offline', message: 'Rewordings need a Gemini key in Settings. Single words get synonyms without one.' };
+  }
+  const profile = getVoiceProfileSummary();
+  const system = `You offer the author alternative wordings for a passage. You never change facts, names or numbers.
+${RULES}
+${profile ? `\nAuthor voice profile:\n${profile.slice(0, 3000)}` : ''}
+
+Reply as JSON: { "options": [ { "text": "...", "label": "..." } ] } with exactly three options that differ in a real way:
+one plainer, one shorter, one that keeps the length but improves rhythm or precision. label is two to four words describing the option.`;
+  try {
+    const ai = client || new GoogleGenAI({ apiKey });
+    const interaction = await ai.interactions.create({
+      model,
+      system_instruction: system,
+      input: `Document type: ${style === 'academic' ? 'academic manuscript' : 'personal statement or narrative'}.
+
+Passage to reword:
+"""${target}"""
+
+Context (for reference only):
+"""${(contextText || '').slice(0, 4000)}"""`,
+      response_format: {
+        type: 'text',
+        mime_type: 'application/json',
+        schema: {
+          type: 'object',
+          properties: { options: { type: 'array', items: { type: 'object', properties: { text: { type: 'string' }, label: { type: 'string' } }, required: ['text', 'label'] } } },
+          required: ['options'],
+        },
+      },
+      store: false,
+    });
+    const parsed = parseModelJson(interaction.output_text || '');
+    const seen = new Set([target]);
+    const options = (parsed.options || [])
+      .map((o) => ({ text: String(o.text || '').trim(), label: String(o.label || '').trim() }))
+      .filter((o) => o.text && !seen.has(o.text) && seen.add(o.text))
+      .slice(0, 4);
+    return { options, source: 'gemini' };
+  } catch (err) {
+    return { options: [], source: 'offline', message: `Gemini request failed (${err.message}).` };
+  }
+}
