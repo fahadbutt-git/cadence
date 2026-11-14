@@ -52,6 +52,9 @@ export class Editor extends EventTarget {
     this.redoStack = [];
     this.typingTimer = null;
     this.flagsEnabled = true;
+    this.groups = null; // check groups that are on; null means all
+    this.layers = {}; // extra highlight layers: name -> [{ index, start, end, expect }]
+    this.commentCounts = {}; // paraId -> open comment count
     this.currentIndex = 0;
     this.root.contentEditable = PLAINTEXT_OK ? 'plaintext-only' : 'true';
     this.root.spellcheck = true;
@@ -100,6 +103,7 @@ export class Editor extends EventTarget {
     });
     this.root.replaceChildren(frag);
     this.markCurrent(this.currentIndex);
+    this.applyCommentCounts();
     this.refreshFlags();
   }
 
@@ -263,26 +267,87 @@ export class Editor extends EventTarget {
   collectFlags() {
     const out = [];
     this.paragraphs.forEach((p, index) => {
-      for (const f of findFlags(p.text)) out.push({ ...f, index });
+      for (const f of findFlags(p.text, this.groups)) out.push({ ...f, index });
     });
     return out;
   }
 
   refreshFlags() {
-    if (!HAS_HIGHLIGHTS) return;
-    if (!this.flagsEnabled) return CSS.highlights.delete('flag');
-    const ranges = [];
-    this.paragraphs.forEach((p, i) => {
-      const el = this.paraEl(i);
-      if (!el) return;
-      for (const f of findFlags(p.text)) ranges.push(rangeFromOffsets(el, f.start, f.end));
-    });
-    CSS.highlights.set('flag', new Highlight(...ranges));
+    if (HAS_HIGHLIGHTS) {
+      const word = [];
+      const hard = [];
+      if (this.flagsEnabled) {
+        this.paragraphs.forEach((p, i) => {
+          const el = this.paraEl(i);
+          if (!el) return;
+          for (const f of findFlags(p.text, this.groups)) (f.sentence ? hard : word).push(rangeFromOffsets(el, f.start, f.end));
+        });
+      }
+      word.length ? CSS.highlights.set('flag', new Highlight(...word)) : CSS.highlights.delete('flag');
+      hard.length ? CSS.highlights.set('hard', new Highlight(...hard)) : CSS.highlights.delete('hard');
+    }
+    for (const name of Object.keys(this.layers)) this.drawLayer(name);
   }
 
   setFlagsEnabled(on) {
     this.flagsEnabled = on;
     this.refreshFlags();
+  }
+
+  setGroups(groups) {
+    this.groups = groups;
+    this.refreshFlags();
+  }
+
+  /** Named highlight layer (grammar, comment, find). Items whose text no longer matches are skipped. */
+  setLayer(name, items = []) {
+    this.layers[name] = items;
+    this.drawLayer(name);
+  }
+
+  drawLayer(name) {
+    if (!HAS_HIGHLIGHTS) return;
+    const ranges = [];
+    for (const it of this.layers[name] || []) {
+      const p = this.paragraphs[it.index];
+      if (!p || (it.expect !== undefined && p.text.slice(it.start, it.end) !== it.expect)) continue;
+      const el = this.paraEl(it.index);
+      if (el) ranges.push(rangeFromOffsets(el, it.start, it.end));
+    }
+    ranges.length ? CSS.highlights.set(name, new Highlight(...ranges)) : CSS.highlights.delete(name);
+  }
+
+  setCommentCounts(counts = {}) {
+    this.commentCounts = counts;
+    this.applyCommentCounts();
+  }
+
+  applyCommentCounts() {
+    this.root.querySelectorAll(':scope > .para').forEach((el) => {
+      const n = this.commentCounts[el.dataset.id] || 0;
+      if (n) el.dataset.comments = String(n);
+      else delete el.dataset.comments;
+    });
+  }
+
+  /** Replace every match of a pattern in one undo step. Returns the number of replacements. */
+  replaceAllMatches(regex, replacement) {
+    let count = 0;
+    const next = this.paragraphs.map((p) => {
+      const text = p.text.replace(regex, () => { count++; return replacement; });
+      return { ...p, text };
+    });
+    if (!count) return 0;
+    this.pushUndo();
+    this.paragraphs = next;
+    this.render();
+    this.emitChange();
+    return count;
+  }
+
+  /** Offset of the caret inside its paragraph, or null. */
+  caretOffset() {
+    return this.getCaret();
   }
 
   // ---------- Undo ----------
@@ -552,8 +617,14 @@ export class Editor extends EventTarget {
       }
       const el = e.target.closest('.para');
       if (el) {
-        this.markCurrent(this.indexOfEl(el));
-        this.dispatchEvent(new CustomEvent('para-click', { detail: { index: this.indexOfEl(el) } }));
+        const index = this.indexOfEl(el);
+        // The comment count bubble sits in the right margin of the paragraph.
+        if (el.dataset.comments && e.clientX > el.getBoundingClientRect().right) {
+          this.dispatchEvent(new CustomEvent('comment-marker', { detail: { index, paraId: el.dataset.id } }));
+          return;
+        }
+        this.markCurrent(index);
+        this.dispatchEvent(new CustomEvent('para-click', { detail: { index, x: e.clientX, y: e.clientY } }));
       }
     });
 

@@ -101,8 +101,17 @@ export function parseCommand(raw = '') {
   if (has(/\b(what's|what is|anything|any) (flagged|wrong)\b|\bany (problems|issues|flags)\b|\bcheck (this|it|the paragraph)\b/)) return { type: 'flags' };
   if (has(/\b(save|keep) (a )?(version|snapshot|checkpoint)\b/)) return { type: 'snapshot' };
 
+  // Comments: "comment the takeaway is unclear", "general comment needs a conclusion", "note: ..."
+  const cm = String(raw).trim().match(/^(?:(?:add|make|leave)\s+(?:a\s+)?)?(general\s+|overall\s+)?(?:comment|note)(?:\s+(?:on|for)\s+(?:the\s+)?(?:whole\s+)?(?:document|essay|piece|statement))?[\s:,.-]+(?:that\s+)?(.{2,})$/i);
+  if (cm) {
+    const general = Boolean(cm[1]) || /^(?:(?:add|make|leave)\s+(?:a\s+)?)?(?:comment|note)\s+(?:on|for)\s+(?:the\s+)?(?:whole\s+)?(?:document|essay|piece|statement)/i.test(String(raw).trim());
+    const body = cm[2].trim();
+    return { type: 'comment', general, text: body.charAt(0).toUpperCase() + body.slice(1) };
+  }
+
   // Edits and questions
   const scope = scopeFrom(text);
+  if (has(/\b(proofread|fix (the )?(grammar|spelling|typos?))\b/)) return { type: 'edit', action: 'proofread', instruction: raw.trim(), scope };
   if (has(/\b(tighten|shorten|trim|make (it|this|that) (shorter|tighter|more concise)|cut it down)\b/) && !has(/\breplace\b/)) return { type: 'edit', action: 'tighten', instruction: raw.trim(), scope };
   if (has(/\b(clean (it |this |that )?up|humani[sz]e|less (like )?ai|sound(s)? less like ai|remove the ai)\b/)) return { type: 'edit', action: 'humanize', instruction: raw.trim(), scope };
   if (has(/\b(cut|remove|drop|delete) the (ending|last sentence|summary|moral|conclusion)\b/)) return { type: 'edit', action: 'cut-ending', instruction: raw.trim(), scope: scope === 'auto' ? 'paragraph' : scope };
@@ -114,4 +123,4 @@ export function parseCommand(raw = '') {
 export const VOICE_HELP =
   'Say continue to keep reading, pause to stop, back or next to move a sentence, go to paragraph three, or start over. ' +
   'To edit, just say what you want, like tighten this sentence or replace pivotal with important. ' +
-  'Then say accept, reject, read it, or undo. Say stop listening when you are done.';
+  'Then say accept, reject, read it, or undo. To leave a note, say comment followed by the note, or general comment for the whole piece. Say stop listening when you are done.';

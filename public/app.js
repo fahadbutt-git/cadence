@@ -1,9 +1,12 @@
 import { ThemeManager } from './js/core/themeManager.js';
 import { buildSentenceReadQueue, computeBurstinessStats, computeWordDiffHtml, escapeHtml, findFlags } from './js/core/textUtils.js';
-import { Editor } from './js/editor.js';
+import { Editor, rangeFromOffsets } from './js/editor.js';
 import { Player } from './js/player.js';
 import { Dictation } from './js/dictation.js';
 import { parseCommand, isBargeIn, cleanTranscript, VOICE_HELP } from './js/core/voiceCommands.js';
+import { Comments } from './js/comments.js';
+import { LanguageChecker } from './js/language.js';
+import { FindBar } from './js/find.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -45,6 +48,12 @@ const player = new Player({
   getRate: () => Number($('#rateSelect').value) || 1,
 });
 const dictation = new Dictation();
+const comments = new Comments(editor, { list: $('#commentList'), empty: $('#commentsEmpty'), count: $('#commentCount'), showResolved: $('#showResolved') });
+const language = new LanguageChecker(editor, $('#issuePop'));
+const finder = new FindBar(editor, {
+  bar: $('#findBar'), input: $('#findInput'), replace: $('#replaceInput'), count: $('#findCount'),
+  prev: $('#findPrev'), next: $('#findNext'), one: $('#replaceOne'), all: $('#replaceAll'), matchCase: $('#findCase'), close: $('#findClose'),
+});
 
 // ---------- Toasts ----------
 
@@ -68,6 +77,11 @@ async function loadConfig() {
   if (!$('#rateSelect').value) $('#rateSelect').value = '1';
   $('#showFlags').checked = state.config.showFlags !== false;
   editor.setFlagsEnabled($('#showFlags').checked);
+  const groups = state.config.checkGroups || {};
+  $$('[data-group]').forEach((cb) => { cb.checked = groups[cb.dataset.group] !== false; });
+  editor.groups = { house: groups.house !== false, clarity: groups.clarity !== false, style: groups.style !== false };
+  language.enabled = state.config.grammarCheck !== false;
+  editor.root.spellcheck = !language.enabled; // the built-in checker would double up the underlines
 }
 
 function fillVoiceSelect(select, selected) {
@@ -244,6 +258,10 @@ async function openDocument(id, { atBookmark = false, play = false, focusTitle =
     $('#paper').classList.toggle('academic', doc.style === 'academic');
     $('#wordTarget').value = doc.wordTarget || '';
     editor.load(doc.paragraphs);
+    comments.load(doc.comments || []);
+    finder.close();
+    language.hide();
+    language.schedule(0);
     setSaveState('');
     refreshDerived();
     loadRevisions();
@@ -283,6 +301,7 @@ async function flushSave(extra = {}) {
     style: $('#styleSelect').value,
     wordTarget: Number($('#wordTarget').value) || null,
     paragraphs: editor.getParagraphs(),
+    comments: comments.all(),
     ...extra,
   };
   state.dirty = false;
@@ -334,8 +353,11 @@ $('#wordTarget').addEventListener('input', () => { scheduleSave(); refreshDerive
 // ---------- Derived views: stats, checks, strip ----------
 
 let derivedTimer = null;
+comments.addEventListener('change', () => scheduleSave());
 editor.addEventListener('change', () => {
   scheduleSave();
+  language.schedule();
+  comments.render();
   if (player.playing) {
     player.pause();
     toast('Paused while you edit. Press Option+Space to continue from the cursor.');
@@ -351,13 +373,15 @@ function refreshDerived() {
   $('#docStats').textContent = `${stats.wordCount.toLocaleString('en-CA')}${target ? ` of ${target.toLocaleString('en-CA')}` : ''} words, about ${stats.listenTimeFormatted} to listen`;
 
   const flags = editor.collectFlags();
-  $('#flagCount').hidden = flags.length === 0;
-  $('#flagCount').textContent = flags.length;
+  updateCheckBadge(flags);
 
   $('#statsGrid').innerHTML = [
     [stats.wordCount.toLocaleString('en-CA') + (target ? ` / ${target.toLocaleString('en-CA')}` : ''), 'Words'],
     [stats.sentenceCount, 'Sentences'],
     [stats.burstinessCv.toFixed(2), 'Sentence variety, aim for 0.45 or more'],
+    [stats.gradeLevel.toFixed(1), 'Reading grade level'],
+    [stats.longSentences, 'Sentences over 25 words'],
+    [stats.charCount.toLocaleString('en-CA'), 'Characters with spaces'],
       ]
     .map(([v, l]) => `<div><dt>${l}</dt><dd>${v}</dd></div>`)
     .join('');
@@ -365,7 +389,7 @@ function refreshDerived() {
   $('#flagsEmpty').hidden = flags.length > 0;
   $('#flagList').innerHTML = flags
     .slice(0, 200)
-    .map((f, i) => `<li class="flag-item" data-i="${i}" tabindex="0"><span><b>${escapeHtml(f.text.replace(/^[,\s]+/, '') || f.text)}</b><span class="muted">${f.label}</span></span><span class="where">Paragraph ${f.index + 1}</span></li>`)
+    .map((f, i) => `<li class="flag-item" data-i="${i}" tabindex="0"><span class="snippet"><b>${escapeHtml((() => { const t = f.text.replace(/^[,\s]+/, '') || f.text; return t.length > 60 ? t.slice(0, 60) + '…' : t; })())}</b><span class="muted">${f.label}</span></span><span class="where">Paragraph ${f.index + 1}</span></li>`)
     .join('');
   $('#flagList').onclick = (e) => {
     const li = e.target.closest('.flag-item');
@@ -376,8 +400,69 @@ function refreshDerived() {
   };
 
   $('#reportText').textContent = 'Open this to run the full report.';
+  renderIssues();
   renderStrip();
 }
+
+function renderIssues() {
+  const list = language.enabled ? language.issues : [];
+  $('#issuesEmpty').hidden = list.length > 0;
+  $('#issuesEmpty').textContent = language.enabled ? 'No spelling or grammar issues found.' : 'Spelling and grammar checking is off. Turn it on in Settings.';
+  $('#issueList').innerHTML = list
+    .slice(0, 200)
+    .map((i, n) => `<li class="flag-item issue-item" data-n="${n}" tabindex="0"><span><b>${escapeHtml(i.text.length > 40 ? i.text.slice(0, 40) + '…' : i.text)}</b>${
+      i.suggestions[0] !== undefined ? `<button class="btn subtle fix" data-fix="${n}" type="button" title="Apply">${i.suggestions[0] === '' ? 'Remove' : escapeHtml(i.suggestions[0])}</button>` : ''
+    }<br><span class="muted">${escapeHtml(i.message.replace(/`/g, ''))}</span></span><span class="where">Paragraph ${i.index + 1}</span></li>`)
+    .join('');
+}
+$('#issueList').addEventListener('click', (e) => {
+  const fix = e.target.closest('[data-fix]');
+  const li = e.target.closest('.issue-item');
+  if (!li) return;
+  const issue = language.issues[Number(li.dataset.n)];
+  if (!issue) return;
+  if (fix) return language.apply(issue, issue.suggestions[0]);
+  quietSelection = true;
+  editor.selectRange(issue.index, issue.start, issue.end);
+});
+// The badge counts what usually needs fixing: spelling, grammar and stock AI phrasing.
+function updateCheckBadge(flags = editor.collectFlags()) {
+  const n = flags.filter((f) => f.group === 'house').length + (language.enabled ? language.issues.length : 0);
+  $('#flagCount').hidden = n === 0;
+  $('#flagCount').textContent = n;
+}
+language.addEventListener('change', () => {
+  renderIssues();
+  updateCheckBadge();
+});
+language.addEventListener('error', (e) => console.warn('Grammar check:', e.detail));
+language.addEventListener('add-word', async (e) => {
+  try {
+    state.config = await api.post('/api/dictionary', { word: e.detail });
+    language.clearCache();
+    toast(`Added "${e.detail}" to your dictionary`);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+});
+// Click an underlined word to see suggestions.
+editor.addEventListener('para-click', (e) => {
+  if (!language.enabled) return;
+  const c = editor.getCaret();
+  const sel = document.getSelection();
+  if (!c || !sel?.isCollapsed) return language.hide();
+  const issue = language.issueAt(c.index, c.offset);
+  if (!issue) return language.hide();
+  const el = editor.paraEl(issue.index);
+  const range = el && rangeFromOffsets(el, issue.start, issue.end);
+  if (range) language.show(issue, range.getBoundingClientRect());
+});
+$$('[data-group]').forEach((cb) => cb.addEventListener('change', () => {
+  const groups = Object.fromEntries($$('[data-group]').map((x) => [x.dataset.group, x.checked]));
+  editor.setGroups(groups);
+  saveConfig({ checkGroups: groups });
+  refreshDerived();
+}));
 
 $('.report').addEventListener('toggle', async (e) => {
   if (!e.target.open) return;
@@ -395,7 +480,7 @@ function renderStrip() {
   stripItems = buildSentenceReadQueue(editor.paragraphs, 0, 0);
   const flagSet = new Set();
   editor.paragraphs.forEach((p, pi) => {
-    for (const f of findFlags(p.text)) flagSet.add(`${pi}:${f.start}`);
+    for (const f of findFlags(p.text, editor.groups)) if (f.group === 'house' || f.kind === 'veryhard') flagSet.add(`${pi}:${f.start}`);
   });
   const now = player.current;
   const html = stripItems
@@ -642,6 +727,10 @@ selBar.addEventListener('click', (e) => {
   if (!act || !info) return;
   selBar.hidden = true;
   if (act === 'listen') return player.say(info.text);
+  if (act === 'comment') {
+    pendingSelectionTarget = { index: info.index, start: info.start, end: info.end, text: info.text, kind: 'selection' };
+    return openCommentComposer();
+  }
   if (act === 'heading') return editor.toggleHeading(info.index);
   const target = { index: info.index, start: info.start, end: info.end, text: info.text, kind: 'selection' };
   if (act === 'ask') {
@@ -801,6 +890,16 @@ async function runCommand(cmd, heard) {
       await flushSave({ createSnapshot: true, snapshotReason: 'Saved by voice' });
       return say('Version saved.');
     case 'stopTalking': stopTalk(); return say('Okay. Talk is off.');
+    case 'comment': {
+      let paraId = null;
+      let index = null;
+      if (!cmd.general) {
+        index = state.pausePoint?.paraIndex ?? editor.getCaret()?.index ?? editor.currentIndex;
+        paraId = editor.paragraphs[index]?.id || null;
+      }
+      comments.add({ paraId, text: cmd.text });
+      return say(paraId ? `Comment added to paragraph ${index + 1}.` : 'General comment added.');
+    }
     case 'help': return say(VOICE_HELP);
     case 'ask':
     case 'edit': {
@@ -881,6 +980,106 @@ dictation.addEventListener('error', (e) => toast(e.detail, 'error'));
 $('#micBtn').addEventListener('click', toggleTalk);
 $('#talkBtn').addEventListener('click', toggleTalk);
 
+// ---------- Comments ----------
+
+let commentTarget = null; // { paraId, quote, index } or null for the whole document
+
+function resolveCommentTarget() {
+  if ($('#commentGeneral').checked) return null;
+  const p = pendingSelectionTarget;
+  if (p && editor.paragraphs[p.index]?.text.slice(p.start, p.end) === p.text) {
+    return { paraId: editor.paragraphs[p.index].id, quote: p.text, index: p.index };
+  }
+  const index = Math.max(0, editor.getCaret()?.index ?? state.pausePoint?.paraIndex ?? editor.currentIndex);
+  const para = editor.paragraphs[index];
+  return para ? { paraId: para.id, quote: '', index } : null;
+}
+
+function updateCommentTargetLabel() {
+  commentTarget = resolveCommentTarget();
+  const t = commentTarget;
+  $('#commentTarget').textContent = !t
+    ? 'Comment on the whole document'
+    : t.quote
+      ? `Comment on "${t.quote.length > 50 ? t.quote.slice(0, 50) + '…' : t.quote}" in paragraph ${t.index + 1}`
+      : `Comment on paragraph ${t.index + 1}`;
+}
+
+function openCommentComposer({ general = false } = {}) {
+  openPanel('comments');
+  $('#commentGeneral').checked = general;
+  updateCommentTargetLabel();
+  $('#commentInput').focus();
+}
+
+$('#commentGeneral').addEventListener('change', updateCommentTargetLabel);
+$('#commentInput').addEventListener('focus', updateCommentTargetLabel);
+$('#commentForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const text = $('#commentInput').value.trim();
+  if (!text) return $('#commentInput').focus();
+  const t = resolveCommentTarget();
+  comments.add({ paraId: t?.paraId || null, quote: t?.quote || '', text });
+  $('#commentInput').value = '';
+  pendingSelectionTarget = null;
+  $('#commentGeneral').checked = false;
+  updateCommentTargetLabel();
+});
+$('#commentInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); $('#commentForm').requestSubmit(); }
+});
+editor.addEventListener('selection', () => {
+  const c = editor.getCaret();
+  if (c && c.index >= 0) comments.setActive(editor.paragraphs[c.index]?.id);
+  if (!$('[data-panel="comments"]').hidden && document.activeElement !== $('#commentInput')) {
+    clearTimeout(commentLabelTimer);
+    commentLabelTimer = setTimeout(updateCommentTargetLabel, 150);
+  }
+});
+let commentLabelTimer = null;
+editor.addEventListener('comment-marker', (e) => {
+  openPanel('comments');
+  comments.setActive(e.detail.paraId);
+  $(`#commentList .comment-item[data-para="${CSS.escape(e.detail.paraId)}"]`)?.scrollIntoView({ block: 'nearest' });
+});
+comments.addEventListener('suggest', async (e) => {
+  const c = e.detail;
+  const loc = comments.locate(c);
+  if (!loc) return toast('That paragraph no longer exists.');
+  const para = editor.paragraphs[loc.index];
+  const target = loc.end > loc.start
+    ? { index: loc.index, start: loc.start, end: loc.end, text: para.text.slice(loc.start, loc.end), kind: 'selection' }
+    : { index: loc.index, start: 0, end: para.text.length, text: para.text, kind: 'paragraph' };
+  openPanel('edit');
+  await requestEdit('rewrite', `Revise to address this reviewer comment: ${c.text}`, { target });
+});
+$('#reviewBtn').addEventListener('click', async () => {
+  const btn = $('#reviewBtn');
+  btn.disabled = true;
+  btn.textContent = 'Reading the draft';
+  try {
+    const res = await api.post('/api/review', { paragraphs: editor.paragraphs.map((p) => ({ type: p.type, text: p.text })), style: $('#styleSelect').value });
+    const n = comments.addMany(res.comments.map((c) => ({ paraId: c.paraIndex === null ? null : editor.paragraphs[c.paraIndex]?.id || null, quote: c.quote || '', text: c.text })));
+    toast(res.notice || (n ? `Added ${n} comment${n === 1 ? '' : 's'}${res.source === 'offline' ? ' from the offline checks. Add a Gemini key in Settings for full feedback.' : ''}` : 'No comments to add.'));
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Get editor feedback';
+  }
+});
+
+// ---------- Find and focus ----------
+
+$('#findToggle').addEventListener('click', () => (finder.isOpen ? finder.close() : finder.open()));
+function setFocusMode(on) {
+  $('#paper').classList.toggle('focus', on);
+  $('#focusToggle').setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem('cadence_focus', on ? '1' : ''); } catch (e) {}
+}
+$('#focusToggle').addEventListener('click', () => setFocusMode(!$('#paper').classList.contains('focus')));
+try { if (localStorage.getItem('cadence_focus')) setFocusMode(true); } catch (e) {}
+
 // ---------- Panel ----------
 
 function openPanel(tab) {
@@ -916,20 +1115,57 @@ async function loadRevisions() {
   const { revisions } = await api.get(`/api/documents/${state.doc.id}/revisions`).catch(() => ({ revisions: [] }));
   $('#revisionList').innerHTML = revisions.length
     ? revisions
-        .map((r, i) => `<li class="rev-item"><div>${escapeHtml(r.reason || 'Version')}<div class="when">${new Date(r.createdAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' })}${r.wordCount ? `, ${r.wordCount} words` : ''}</div></div><button class="btn" data-rev="${i}" type="button">Restore</button></li>`)
+        .map((r, i) => `<li class="rev-item"><div>${escapeHtml(r.reason || 'Version')}<div class="when">${new Date(r.createdAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' })}${r.wordCount ? `, ${r.wordCount} words` : ''}</div></div><button class="btn" data-rev="${i}" type="button">Compare</button></li>`)
         .join('')
     : '<li class="muted small">No saved versions yet.</li>';
-  $('#revisionList').onclick = async (e) => {
+  $('#revisionList').onclick = (e) => {
     const b = e.target.closest('[data-rev]');
-    if (!b) return;
-    const rev = revisions[Number(b.dataset.rev)];
+    if (b) compareVersion(revisions[Number(b.dataset.rev)]);
+  };
+}
+
+function compareVersion(rev) {
+  const now = editor.paragraphs;
+  const byId = new Map(now.map((p, i) => [p.id, i]));
+  const blocks = [];
+  let added = 0;
+  let removed = 0;
+  const seen = new Set();
+  rev.paragraphs.forEach((old, i) => {
+    const j = byId.has(old.id) ? byId.get(old.id) : i < now.length && !rev.paragraphs.some((x) => x.id === now[i].id) ? i : -1;
+    const cur = j >= 0 ? now[j] : null;
+    if (cur) seen.add(cur.id);
+    const before = old.text;
+    const after = cur ? cur.text : '';
+    if (before === after) return;
+    const wb = before.split(/\s+/).filter(Boolean).length;
+    const wa = after.split(/\s+/).filter(Boolean).length;
+    added += Math.max(0, wa - wb);
+    removed += Math.max(0, wb - wa);
+    blocks.push(`<div class="compare-para"><div class="where">${cur ? `Paragraph ${j + 1}` : 'Removed since this version'}</div>${computeWordDiffHtml(before, after)}</div>`);
+  });
+  now.forEach((p, j) => {
+    if (seen.has(p.id) || rev.paragraphs.some((x) => x.id === p.id)) return;
+    if (!p.text.trim()) return;
+    added += p.text.split(/\s+/).filter(Boolean).length;
+    blocks.push(`<div class="compare-para"><div class="where">Paragraph ${j + 1}, new since this version</div><ins>${escapeHtml(p.text)}</ins></div>`);
+  });
+  $('#compareTitle').textContent = `${rev.reason || 'Version'}, ${new Date(rev.createdAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' })}`;
+  $('#compareSummary').textContent = blocks.length
+    ? `${blocks.length} paragraph${blocks.length === 1 ? '' : 's'} differ. Struck-through text is in the saved version only, underlined text is in your current draft.`
+    : 'This version matches your current text.';
+  $('#compareBody').innerHTML = blocks.join('');
+  const dlg = $('#compareDialog');
+  dlg.showModal();
+  dlg.addEventListener('close', async () => {
+    if (dlg.returnValue !== 'restore') return;
     await flushSave({ createSnapshot: true, snapshotReason: 'Before restoring an earlier version' });
     editor.pushUndo();
     editor.paragraphs = rev.paragraphs.map((p) => ({ ...p }));
     editor.render();
     editor.emitChange();
     toast('Earlier version restored. Cmd+Z to undo.');
-  };
+  }, { once: true });
 }
 $('#snapshotBtn').addEventListener('click', async () => {
   state.dirty = true;
@@ -951,8 +1187,9 @@ exportMenu.addEventListener('click', async (e) => {
   const a = e.target.closest('[data-export]');
   if (!a) return;
   await flushSave();
-  const fmt = a.dataset.export;
-  const url = `/api/documents/${state.doc.id}/export?format=${fmt}${fmt === 'mp3' ? `&voice=${encodeURIComponent($('#voiceSelect').value)}` : ''}`;
+  const fmt = a.dataset.export === 'docx-clean' ? 'docx' : a.dataset.export;
+  const clean = a.dataset.export === 'docx-clean' ? '&comments=0' : '';
+  const url = `/api/documents/${state.doc.id}/export?format=${fmt}${clean}${fmt === 'mp3' ? `&voice=${encodeURIComponent($('#voiceSelect').value)}` : ''}`;
   if (fmt === 'mp3') toast('Preparing audio. This can take a minute for long documents.');
   const link = document.createElement('a');
   link.href = url;
@@ -987,6 +1224,20 @@ $('#pronList').addEventListener('click', (e) => {
   renderPronunciations(list);
 });
 
+function renderDictionary() {
+  const words = state.config.dictionary || [];
+  $('#dictList').innerHTML = words.length
+    ? words.map((w) => `<li>${escapeHtml(w)}<button type="button" class="icon-btn" data-word="${escapeHtml(w)}" aria-label="Remove ${escapeHtml(w)}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6 6l8 8M14 6l-8 8"/></svg></button></li>`).join('')
+    : '<li class="muted small" style="border:0">No words yet.</li>';
+}
+$('#dictList').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-word]');
+  if (!b) return;
+  state.config = await api.post('/api/dictionary', { word: b.dataset.word, remove: true });
+  renderDictionary();
+  language.clearCache();
+});
+
 function openSettings() {
   const c = state.config;
   fillVoiceSelect($('#setVoice'), c.voiceId);
@@ -995,6 +1246,9 @@ function openSettings() {
   $('#setApiKey').placeholder = c.hasApiKey ? 'Saved. Type to replace' : 'Not set';
   $('#removeKeyBtn').hidden = !c.hasApiKey;
   renderPronunciations(c.pronunciations || []);
+  $('#setReviewer').value = c.reviewerName || '';
+  $('#setGrammar').checked = c.grammarCheck !== false;
+  renderDictionary();
   $('#settingsDialog').showModal();
 }
 $$('input[name="theme"]').forEach((r) => r.addEventListener('change', () => theme.applyTheme(r.value)));
@@ -1015,6 +1269,8 @@ $('#settingsDialog').addEventListener('close', async () => {
     voiceId: $('#setVoice').value,
     themePreference: $$('input[name="theme"]').find((r) => r.checked)?.value || 'system',
     pronunciations: readPronunciations(),
+    reviewerName: $('#setReviewer').value.trim(),
+    grammarCheck: $('#setGrammar').checked,
   };
   const key = $('#setApiKey').value.trim();
   if (key) patch.apiKey = key;
@@ -1022,6 +1278,8 @@ $('#settingsDialog').addEventListener('close', async () => {
   theme.applyTheme(state.config.themePreference);
   fillVoiceSelect($('#voiceSelect'), state.config.voiceId);
   player.cache.clear();
+  editor.root.spellcheck = !state.config.grammarCheck;
+  if (language.enabled !== state.config.grammarCheck) language.setEnabled(state.config.grammarCheck);
   toast('Settings saved');
 });
 
@@ -1047,8 +1305,12 @@ window.addEventListener('keydown', (e) => {
   if (!inEditor) return;
 
   if (e.altKey && (e.code === 'Space')) { e.preventDefault(); togglePlay(); return; }
-  if (e.altKey && e.code === 'KeyM') { e.preventDefault(); toggleTalk(); return; }
+  if (e.altKey && !mod && e.code === 'KeyM') { e.preventDefault(); toggleTalk(); return; }
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPanel('edit'); $('#askInput').focus(); return; }
+  if (mod && !e.shiftKey && e.code === 'KeyF') { e.preventDefault(); finder.open({ withReplace: e.altKey }); return; }
+  if (mod && e.shiftKey && e.code === 'KeyF') { e.preventDefault(); $('#focusToggle').click(); return; }
+  if (mod && e.altKey && e.code === 'KeyM') { e.preventDefault(); openCommentComposer(); return; }
+  if (mod && e.key.toLowerCase() === 'g' && finder.isOpen) { e.preventDefault(); finder.step(e.shiftKey ? -1 : 1); return; }
   if (mod && e.key === '\\') { e.preventDefault(); $('#panelToggle').click(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); state.dirty = true; flushSave(); return; }
   if (mod && e.key === 'Enter') {
@@ -1058,6 +1320,8 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
+    if (!$('#issuePop').hidden) { language.hide(); return; }
+    if (finder.isOpen) { finder.close(); return; }
     if (!selBar.hidden) { selBar.hidden = true; return; }
     if (player.playing) { player.pause(); return; }
     if (dictation.listening) { dictation.stop(); return; }

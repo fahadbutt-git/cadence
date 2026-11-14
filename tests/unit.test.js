@@ -123,6 +123,15 @@ test('parseCommand turns free speech into scoped edits and questions', () => {
   assert.equal(f.type, 'edit');
 });
 
+test('parseCommand recognises spoken comments and proofreading', () => {
+  assert.deepEqual(voice.parseCommand("comment I don't think there is a clear takeaway here"), { type: 'comment', general: false, text: "I don't think there is a clear takeaway here" });
+  assert.deepEqual(voice.parseCommand('general comment there needs to be a conclusion that ends everything'), { type: 'comment', general: true, text: 'There needs to be a conclusion that ends everything' });
+  assert.deepEqual(voice.parseCommand('add a note: why is seva important'), { type: 'comment', general: false, text: 'Why is seva important' });
+  assert.equal(voice.parseCommand('leave a comment on the whole essay it needs a through-line').general, true);
+  assert.equal(voice.parseCommand('proofread this paragraph').action, 'proofread');
+  assert.equal(voice.parseCommand('fix the spelling').action, 'proofread');
+});
+
 test('echo filter ignores the reading voice and catches the person talking over it', () => {
   const reading = ['At the slit lamp, you look directly at cellular inflammation.'];
   assert.equal(voice.isBargeIn('at the slit lamp you look', reading), false);
@@ -133,6 +142,19 @@ test('echo filter ignores the reading voice and catches the person talking over 
   assert.equal(voice.isBargeIn('inflammation', reading), false);
   assert.equal(voice.cleanTranscript('directly at cellular make this shorter', reading), 'make this shorter');
   assert.equal(voice.cleanTranscript('continue', reading), 'continue');
+});
+
+test('style checks cover clarity and repetition, and groups can be switched off', () => {
+  const s = 'I was taught by them. I really think this cemented my desire. The emergency room and the emergency team were busy.';
+  const kinds = text.findFlags(s).map((f) => f.kind);
+  for (const k of ['passive', 'filler', 'cliche', 'start', 'echo']) assert.ok(kinds.includes(k), k);
+  assert.equal(kinds.filter((k) => k === 'adverb').length, 0, 'filler words are not also adverbs');
+  const noStyle = text.findFlags(s, { style: false }).map((f) => f.kind);
+  assert.ok(!noStyle.includes('cliche') && !noStyle.includes('echo'));
+  const long = text.findFlags(`${'word '.repeat(40).trim()}.`);
+  assert.equal(long.find((f) => f.sentence).kind, 'veryhard');
+  assert.equal(text.syllables('hemorrhage'), 3);
+  assert.ok(text.computeBurstinessStats('The cat sat. It was happy.').gradeLevel >= 0);
 });
 
 // ---------- config ----------
@@ -171,6 +193,35 @@ test('import helpers keep headings from Word HTML and markdown', () => {
   assert.deepEqual(fromHtml.map((p) => [p.type, p.text]), [['heading', 'Title & more'], ['body', 'First para.'], ['body', 'Second.']]);
   const fromMd = repo.paragraphsFromText('# Heading\n\nLine one\ncontinues.\n\nSecond para.');
   assert.deepEqual(fromMd.map((p) => [p.type, p.text]), [['heading', 'Heading'], ['body', 'Line one continues.'], ['body', 'Second para.']]);
+});
+
+test('comments are stored with the document and dropped to general when their paragraph goes', () => {
+  const doc = repo.upsertDocument({ title: 'C', paragraphs: [{ id: 'p1', text: 'One.' }, { id: 'p2', text: 'Two.' }], comments: [
+    { id: 'a', paraId: 'p1', quote: 'One', text: 'Why?' }, { id: 'b', paraId: null, text: 'Needs a conclusion' }, { id: 'c', text: '   ' },
+  ] });
+  assert.equal(doc.comments.length, 2);
+  const again = repo.upsertDocument({ id: doc.id, paragraphs: [{ id: 'p2', text: 'Two.' }] });
+  assert.equal(again.comments.find((c) => c.id === 'a').paraId, null);
+  assert.equal(repo.listDocuments().find((d) => d.id === doc.id).openComments, 2);
+  repo.deleteDocument(doc.id);
+});
+
+test('Word export carries open comments as real Word comments', async () => {
+  const buf = await repo.generateCleanDocxBuffer({
+    paragraphs: [{ id: 'h', type: 'heading', text: 'Title' }, { id: 'b', text: 'Seva is a word. It matters.' }],
+    comments: [{ id: '1', paraId: null, text: 'Needs a conclusion' }, { id: '2', paraId: 'b', quote: 'It matters.', text: 'Why?' }, { id: '3', paraId: 'b', text: 'Old', resolved: true }],
+    author: 'Fahad Butt',
+  });
+  const { execFileSync } = await import('node:child_process');
+  const tmp = path.join(TMP, 'c.docx');
+  fs.writeFileSync(tmp, buf);
+  const xml = execFileSync('unzip', ['-p', tmp, 'word/comments.xml']).toString();
+  assert.match(xml, /General comment: Needs a conclusion/);
+  assert.match(xml, /Why\?/);
+  assert.doesNotMatch(xml, />Old</);
+  assert.match(xml, /w:author="Fahad Butt"/);
+  const md = repo.documentAsMarkdown({ paragraphs: [{ id: 'b', text: 'x' }], comments: [{ paraId: 'b', quote: 'x', text: 'Why?' }] });
+  assert.match(md, /## Comments[\s\S]*On "x": Why\?/);
 });
 
 test('docx export produces a valid zip with no author metadata', async () => {
@@ -217,6 +268,29 @@ test('Gemini editor parses JSON replies and falls back offline on failure', asyn
   assert.equal(f.source, 'offline');
   assert.equal(f.proposedText, 'We used it.');
   assert.match(f.rationale, /model not found/);
+});
+
+test('offline editor feedback flags lists, stock phrases and summary endings', () => {
+  const r = editorial.localReview([
+    { type: 'body', text: 'I led the club, ran events, taught classes, wrote guides, and organised fundraisers. This fuelled my passion for medicine.' },
+    { type: 'body', text: 'I sat with her. This experience taught me compassion.' },
+  ]);
+  const texts = r.comments.map((c) => c.text).join(' ');
+  assert.match(texts, /reads as a list/);
+  assert.match(texts, /Stock phrase/);
+  assert.match(texts, /closing line/);
+  assert.ok(r.comments.some((c) => c.paraIndex === null));
+  assert.ok(r.comments.filter((c) => c.quote).every((c) => c.paraIndex !== null));
+});
+
+test('local grammar checker finds spelling and grammar errors and respects the dictionary', async () => {
+  const grammar = await import('../src/main/domains/language/grammarService.js');
+  const issues = await grammar.checkParagraphs(['Their going to the clinic tomorow. I has a idea about OCT.', 'Seva matters.'], { userDictionary: ['Seva'] });
+  const found = issues.map((i) => i.text);
+  for (const w of ['Their', 'tomorow', 'has', 'a']) assert.ok(found.includes(w), w);
+  assert.ok(!found.includes('OCT'), 'acronyms are skipped');
+  assert.ok(!found.includes('Seva'), 'dictionary words are skipped');
+  assert.ok(issues.find((i) => i.text === 'tomorow').suggestions.includes('tomorrow'));
 });
 
 // ---------- voice ----------
@@ -276,6 +350,13 @@ test('HTTP API: config, documents, edit, tts, export and import', async () => {
     const imported = await (await fetch(`${base}/import`, { method: 'POST', body: fd })).json();
     assert.equal(imported.title, 'notes');
     assert.equal(imported.paragraphs[0].type, 'heading');
+
+    const proof = await (await fetch(`${base}/edit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'proofread', targetText: 'I recieved alot of help.' }) })).json();
+    assert.equal(proof.proposedText, 'I received a lot of help.');
+    const rev = await (await fetch(`${base}/review`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paragraphs: [{ text: 'I sat with her. This experience taught me compassion.' }] }) })).json();
+    assert.equal(rev.source, 'offline');
+    const dict = await (await fetch(`${base}/dictionary`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ word: 'Seva' }) })).json();
+    assert.deepEqual(dict.dictionary, ['Seva']);
 
     const badImport = new FormData();
     badImport.append('file', new Blob(['x']), 'x.pdf');

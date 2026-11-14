@@ -54,6 +54,8 @@ if [ "${BUNDLE:-0}" = "1" ]; then
   cp -R "$ROOT_DIR/server.js" "$ROOT_DIR/package.json" "$ROOT_DIR/src" "$ROOT_DIR/public" "$APP_RES/"
   [ -d "$ROOT_DIR/node_modules" ] || (cd "$ROOT_DIR" && npm ci --omit=dev)
   cp -R "$ROOT_DIR/node_modules" "$APP_RES/node_modules"
+  # The grammar checker ships several builds; the server only loads binary.js with harper_wasm_bg.wasm.
+  rm -f "$APP_RES/node_modules/harper.js/dist/"*Inlined.js "$APP_RES/node_modules/harper.js/dist/harper_wasm_slim_bg.wasm"
   if [ -n "${NODE_DIR:-}" ]; then
     mkdir -p "$CONTENTS/Resources/node/bin"
     cp "$NODE_DIR/bin/node" "$CONTENTS/Resources/node/bin/node"

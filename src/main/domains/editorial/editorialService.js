@@ -11,6 +11,8 @@ export const ACTIONS = {
     'If the target text ends on a moralizing summary sentence that explains what the experience meant, remove it so the text ends on a concrete action or detail. Change nothing else.',
   'from-dictation':
     'The target text is rough dictated speech. Turn it into a clean paragraph in the author\'s voice. Keep their specific details and phrases.',
+  proofread:
+    'Proofread the target text. Fix only errors: spelling, grammar, punctuation, agreement, and wrong words that are real words (for example "spinal cold injury" should be "spinal cord injury"). Keep the wording, voice and length otherwise identical. Use Canadian spelling.',
   ask: 'Answer the question about the text. Do not edit. Return an empty proposedText.',
 };
 
@@ -184,5 +186,98 @@ Reply as JSON with keys:
   } catch (err) {
     const local = localRuleBasedEdit(action, targetText, instruction);
     return { ...local, rationale: `Gemini request failed (${err.message}). ${local.rationale}`, source: 'offline' };
+  }
+}
+
+// ---------- Editor feedback as comments ----------
+
+const REVIEW_RUBRIC = `Review this draft the way an experienced mentor marks up a residency personal statement or similar piece.
+Write margin comments, not rewrites. Each comment is one to three short sentences, direct and specific, phrased as a question or an instruction to the author.
+Judge each paragraph on:
+- Does it have one clear takeaway? Say what is missing if not.
+- Does every detail serve the narrative or the reason for choosing the specialty or program? Flag lists of titles, roles or activities that make no point.
+- Does it show who the writer is and what drives them, not just what they did?
+- Does it connect to the theme or story introduced earlier?
+- For a program paragraph: does it say why this program fits the writer's story, not just what the program offers?
+Also judge the whole piece: is there a through-line, and does a conclusion tie it together?
+Skip praise unless it tells the author what to keep. Do not comment on spelling. At most three comments per paragraph.`;
+
+/** Offline feedback built from the text checks, used when no API key is set. */
+export function localReview(paragraphs = []) {
+  const comments = [];
+  const bodies = paragraphs.map((p, i) => ({ ...p, i })).filter((p) => p.type !== 'heading' && (p.text || '').trim());
+  for (const p of bodies) {
+    const text = p.text;
+    const sents = text.match(/[^.!?]+[.!?]+["')\]]*/g) || [text];
+    const notes = [];
+    // A list: four or more comma-separated chunks that are mostly short.
+    const listy = sents.find((s) => {
+      const parts = s.split(/,|;|\band\b/).map((x) => x.trim().split(/\s+/).filter(Boolean).length).filter(Boolean);
+      const short = parts.filter((n) => n <= 6).length;
+      return parts.length >= 4 && short / parts.length >= 0.6;
+    });
+    if (listy) notes.push({ quote: listy.trim(), text: 'This reads as a list. Keep only the items that make the paragraph\'s point, or say what they add up to.' });
+    const iStarts = sents.filter((s) => /^\s*I\b/.test(s)).length;
+    if (sents.length >= 4 && iStarts / sents.length > 0.5) notes.push({ text: 'Most sentences start with "I". Vary the openings so the paragraph reads less like a list of actions.' });
+    const long = sents.filter((s) => s.split(/\s+/).length > 35);
+    if (long.length) notes.push({ quote: long[0].trim(), text: `${long.length === 1 ? 'This sentence runs' : `${long.length} sentences run`} past 35 words. Split them so the main point lands.` });
+    const last = (sents.at(-1) || '').trim();
+    if (sents.length > 1 && /\b(taught me|showed me|reminded me|this experience|ultimately|truly|purest|truest)\b/i.test(last)) notes.push({ quote: last, text: 'This closing line explains what the story meant. Consider ending on the concrete moment instead.' });
+    const stock = text.match(/\b(passion for|passionate about|make a difference|ever since|lifelong dream|cemented my desire|fuell?ed my passion)\b/i);
+    if (stock) notes.push({ quote: stock[0], text: 'Stock phrase. Replace it with the specific detail that made you feel this.' });
+    // Anchor on the opening words only, so the highlight marks where the issue starts without shading whole sentences.
+    const anchor = (q) => (q ? q.split(/\s+/).slice(0, 8).join(' ') : '');
+    for (const n of notes.slice(0, 3)) {
+      const q = anchor(n.quote);
+      comments.push({ paraIndex: p.i, quote: q && text.includes(q) ? q : '', text: n.text });
+    }
+  }
+  const last = bodies.at(-1);
+  if (last && last.text.split(/\s+/).length < 60) comments.push({ paraIndex: null, text: 'The ending is short. Make sure the conclusion ties the opening theme to why you want this specialty and program.' });
+  if (bodies.length >= 3) comments.push({ paraIndex: null, text: 'Check that each paragraph has one clear takeaway and that together they build one argument. Offline review only checks surface patterns. Add a Gemini API key in Settings for full editor feedback.' });
+  return { comments, source: 'offline' };
+}
+
+export async function generateReview({ apiKey = '', model = 'gemini-3.8-flash', paragraphs = [], style = 'narrative', client = null }) {
+  if (!apiKey.trim() && !client) return localReview(paragraphs);
+  const numbered = paragraphs.map((p, i) => `[${i}]${p.type === 'heading' ? ' (heading)' : ''} ${p.text}`).join('\n\n');
+  try {
+    const ai = client || new GoogleGenAI({ apiKey });
+    const interaction = await ai.interactions.create({
+      model,
+      system_instruction: `${REVIEW_RUBRIC}\n\nDocument type: ${style === 'academic' ? 'academic manuscript' : 'personal statement or narrative'}.\n${RULES}\n\nReply as JSON: { "comments": [ { "paraIndex": number or null for a comment on the whole piece, "quote": exact short phrase from that paragraph or "", "text": the comment } ] }`,
+      input: numbered,
+      response_format: {
+        type: 'text',
+        mime_type: 'application/json',
+        schema: {
+          type: 'object',
+          properties: {
+            comments: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { paraIndex: { type: ['integer', 'null'] }, quote: { type: 'string' }, text: { type: 'string' } },
+                required: ['paraIndex', 'text'],
+              },
+            },
+          },
+          required: ['comments'],
+        },
+      },
+      store: false,
+    });
+    const parsed = parseModelJson(interaction.output_text || '');
+    const comments = (parsed.comments || [])
+      .filter((c) => c && c.text && (c.paraIndex === null || (Number.isInteger(c.paraIndex) && c.paraIndex >= 0 && c.paraIndex < paragraphs.length)))
+      .map((c) => ({
+        paraIndex: c.paraIndex,
+        quote: c.paraIndex !== null && c.quote && paragraphs[c.paraIndex].text.includes(c.quote) ? c.quote : '',
+        text: c.text.trim(),
+      }));
+    return { comments, source: 'gemini' };
+  } catch (err) {
+    const local = localReview(paragraphs);
+    return { ...local, notice: `Gemini request failed (${err.message}). Showing offline feedback.` };
   }
 }

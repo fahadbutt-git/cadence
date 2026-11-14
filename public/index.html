@@ -63,11 +63,18 @@
         <div class="menu-wrap">
           <button class="btn" id="exportBtn" type="button" aria-haspopup="menu" aria-expanded="false">Export</button>
           <div class="menu" id="exportMenu" role="menu" hidden>
-            <a role="menuitem" data-export="docx">Word document (.docx)</a>
+            <a role="menuitem" data-export="docx">Word document with comments (.docx)</a>
+            <a role="menuitem" data-export="docx-clean">Word document, clean copy (.docx)</a>
             <a role="menuitem" data-export="md">Markdown (.md)</a>
             <a role="menuitem" data-export="mp3">Audio of whole document (.mp3)</a>
           </div>
         </div>
+        <button class="icon-btn" id="findToggle" type="button" aria-label="Find and replace" title="Find and replace (Cmd+F)">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5"/><path d="m12.5 12.5 4.5 4.5"/></svg>
+        </button>
+        <button class="icon-btn" id="focusToggle" type="button" aria-pressed="false" aria-label="Focus mode" title="Focus mode: dim everything but the current paragraph (Cmd+Shift+F)">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 7V4h3M14 4h3v3M17 13v3h-3M6 16H3v-3"/><circle cx="10" cy="10" r="2"/></svg>
+        </button>
         <button class="icon-btn" id="panelToggle" type="button" aria-pressed="true" aria-label="Show or hide tools" title="Show or hide tools (Cmd+\)">
           <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M12.5 3.5v13"/></svg>
         </button>
@@ -79,6 +86,17 @@
 
     <div class="editor-body">
       <div class="desk" id="desk">
+        <div id="findBar" class="findbar" role="search" hidden>
+          <input id="findInput" type="search" placeholder="Find" aria-label="Find" />
+          <span id="findCount" class="muted small"></span>
+          <button class="icon-btn" id="findPrev" type="button" aria-label="Previous match" title="Previous (Shift+Enter)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 12.5 10 7.5l5 5"/></svg></button>
+          <button class="icon-btn" id="findNext" type="button" aria-label="Next match" title="Next (Enter)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 7.5 10 12.5l5-5"/></svg></button>
+          <input id="replaceInput" type="text" placeholder="Replace with" aria-label="Replace with" />
+          <button class="btn" id="replaceOne" type="button">Replace</button>
+          <button class="btn" id="replaceAll" type="button">Replace all</button>
+          <label class="toggle small"><input type="checkbox" id="findCase" /> <span>Match case</span></label>
+          <button class="icon-btn" id="findClose" type="button" aria-label="Close find" title="Close (Escape)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"/></svg></button>
+        </div>
         <article id="paper" class="paper" aria-label="Document text"></article>
         <div id="caption" class="caption" role="status" aria-live="polite" hidden>
           <span id="captionWho" class="who"></span>
@@ -89,6 +107,7 @@
       <aside id="panel" class="panel" aria-label="Side panel">
         <div class="tabs" role="tablist">
           <button role="tab" class="tab" aria-selected="true" data-tab="edit">Edit</button>
+          <button role="tab" class="tab" aria-selected="false" data-tab="comments">Comments <span id="commentCount" class="count neutral" hidden></span></button>
           <button role="tab" class="tab" aria-selected="false" data-tab="checks">Checks <span id="flagCount" class="count" hidden></span></button>
           <button role="tab" class="tab" aria-selected="false" data-tab="history">History</button>
         </div>
@@ -106,6 +125,7 @@
             </div>
           </form>
           <div class="quick">
+            <button class="chip" data-action="proofread" type="button">Proofread</button>
             <button class="chip" data-action="tighten" type="button">Tighten</button>
             <button class="chip" data-action="humanize" type="button">Clean up phrasing</button>
             <button class="chip" data-action="cut-ending" type="button">Cut summary ending</button>
@@ -117,13 +137,36 @@
           <p id="suggestionsEmpty" class="muted small">Suggested edits show here and under their paragraph. Accept or reject them in either place.</p>
         </div>
 
+        <div class="tabpanel" data-panel="comments" hidden>
+          <form id="commentForm" class="ask">
+            <p id="commentTarget" class="muted small">Comment on paragraph 1</p>
+            <textarea id="commentInput" rows="3" placeholder="Write a comment. Example: I don't think there is a clear takeaway from this paragraph" aria-label="Comment"></textarea>
+            <div class="row between">
+              <label class="toggle small"><input type="checkbox" id="commentGeneral" /> <span>On the whole document</span></label>
+              <button class="btn primary" type="submit">Add comment</button>
+            </div>
+          </form>
+          <div class="row between comment-tools">
+            <button id="reviewBtn" class="btn" type="button" title="Comments on each paragraph and the whole piece, like a mentor's markup">Get editor feedback</button>
+            <label class="toggle small"><input type="checkbox" id="showResolved" /> <span>Show resolved</span></label>
+          </div>
+          <ul id="commentList" class="comments"></ul>
+          <p id="commentsEmpty" class="muted small">No comments yet. Select text and choose Comment, write one above, or say "comment" followed by your note while Talk is on.</p>
+        </div>
+
         <div class="tabpanel" data-panel="checks" hidden>
+          <h3 class="sub first">Spelling and grammar</h3>
+          <ul id="issueList" class="flags"></ul>
+          <p id="issuesEmpty" class="muted small">No spelling or grammar issues found.</p>
+          <h3 class="sub">Readability</h3>
           <dl class="stats" id="statsGrid"></dl>
-          <h3 class="sub">Flagged phrases</h3>
-          <label class="toggle">
-            <input id="showFlags" type="checkbox" checked />
-            <span>Underline them in the text</span>
-          </label>
+          <h3 class="sub">Style</h3>
+          <div class="group-toggles">
+            <label class="toggle small"><input type="checkbox" data-group="house" checked /> <span>Stock AI phrasing</span></label>
+            <label class="toggle small"><input type="checkbox" data-group="clarity" checked /> <span>Clarity</span></label>
+            <label class="toggle small"><input type="checkbox" data-group="style" checked /> <span>Clichés and repetition</span></label>
+            <label class="toggle small"><input id="showFlags" type="checkbox" checked /> <span>Underline in the text</span></label>
+          </div>
           <ul id="flagList" class="flags"></ul>
           <p id="flagsEmpty" class="muted small" hidden>Nothing flagged.</p>
           <h3 class="sub">Document</h3>
@@ -192,10 +235,23 @@
   <!-- Floating selection toolbar -->
   <div id="selToolbar" class="sel-toolbar" role="toolbar" aria-label="Selection" hidden>
     <button type="button" data-sel="listen">Listen</button>
+    <button type="button" data-sel="comment">Comment</button>
+    <button type="button" data-sel="proofread">Proofread</button>
     <button type="button" data-sel="tighten">Tighten</button>
     <button type="button" data-sel="humanize">Clean up</button>
     <button type="button" data-sel="ask">Rewrite…</button>
     <button type="button" data-sel="heading" title="Toggle heading (Cmd+Shift+H)">Heading</button>
+  </div>
+
+  <!-- Spelling and grammar suggestion -->
+  <div id="issuePop" class="issue-pop" role="dialog" aria-label="Suggestion" hidden>
+    <p class="pop-kind"></p>
+    <p class="pop-msg"></p>
+    <div class="pop-fixes"></div>
+    <div class="row">
+      <button type="button" class="btn subtle" data-pop="ignore">Ignore</button>
+      <button type="button" class="btn subtle" data-pop="dict">Add to dictionary</button>
+    </div>
   </div>
 
   <!-- Settings -->
@@ -225,6 +281,16 @@
       <div class="row">
         <button type="button" class="btn subtle" id="removeKeyBtn" hidden>Remove key</button>
       </div>
+      <label class="field">
+        <span>Your name on comments</span>
+        <input id="setReviewer" type="text" placeholder="Shown on comments in Word exports" />
+      </label>
+      <label class="toggle"><input type="checkbox" id="setGrammar" /> <span>Check spelling and grammar as I write (runs on this Mac)</span></label>
+      <fieldset class="field">
+        <legend>Personal dictionary</legend>
+        <small class="muted">Words the spelling check accepts. Add more from any spelling suggestion.</small>
+        <ul id="dictList" class="dict-list"></ul>
+      </fieldset>
       <fieldset class="field">
         <legend>Pronunciations</legend>
         <small class="muted">Tell the voice how to say names, acronyms or drug names.</small>
@@ -237,7 +303,8 @@
           <dt>Reading</dt><dd>continue, pause, back, next, repeat, start over, go to paragraph three, next paragraph, faster, slower</dd>
           <dt>Editing</dt><dd>tighten this sentence, clean up this paragraph, cut the ending, replace pivotal with important, or any instruction in your own words</dd>
           <dt>Deciding</dt><dd>accept, reject, read it, undo</dd>
-          <dt>Other</dt><dd>what is flagged, save a version, help, stop listening</dd>
+          <dt>Comments</dt><dd>comment, followed by your note, for this paragraph. General comment, followed by your note, for the whole document</dd>
+          <dt>Other</dt><dd>proofread this, what is flagged, save a version, help, stop listening</dd>
         </dl>
       </details>
       <details class="shortcuts">
@@ -248,6 +315,9 @@
           <dt>[ and ]</dt><dd>Previous or next sentence while reading</dd>
           <dt>Option+M</dt><dd>Turn Talk on or off. While on, speak any time: it pauses, acts, and continues when you say continue</dd>
           <dt>Cmd+K</dt><dd>Type an instruction</dd>
+          <dt>Cmd+F</dt><dd>Find and replace</dd>
+          <dt>Cmd+Option+M</dt><dd>Comment on the selection or paragraph</dd>
+          <dt>Cmd+Shift+F</dt><dd>Focus mode</dd>
           <dt>Cmd+Enter</dt><dd>Accept the suggestion for this paragraph</dd>
           <dt>Cmd+Z</dt><dd>Undo, including accepted suggestions</dd>
           <dt>Cmd+Shift+H</dt><dd>Toggle heading</dd>
@@ -257,6 +327,19 @@
       <div class="dialog-actions">
         <button value="cancel" class="btn" type="submit">Cancel</button>
         <button value="save" class="btn primary" type="submit" id="saveSettingsBtn">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Compare versions -->
+  <dialog id="compareDialog" class="dialog wide">
+    <form method="dialog">
+      <h2 id="compareTitle">Compare with current text</h2>
+      <p id="compareSummary" class="muted small"></p>
+      <div id="compareBody" class="compare-body"></div>
+      <div class="dialog-actions">
+        <button value="close" class="btn" type="submit">Close</button>
+        <button value="restore" class="btn primary" type="submit">Restore this version</button>
       </div>
     </form>
   </dialog>

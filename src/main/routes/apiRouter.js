@@ -16,7 +16,8 @@ import {
 } from '../domains/projects/projectRepository.js';
 import { synthesizeSpeech, synthesizeDocumentMp3 } from '../domains/voice/ttsService.js';
 import { runForensicAuditReport } from '../domains/forensics/forensicsService.js';
-import { generateEditorialRevision } from '../domains/editorial/editorialService.js';
+import { checkParagraphs } from '../domains/language/grammarService.js';
+import { generateEditorialRevision, generateReview } from '../domains/editorial/editorialService.js';
 
 const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 25 * 1024 * 1024 } });
 const fileSafe = (s = 'Document') => String(s).replace(/[^\w .-]+/g, '').trim().replace(/\s+/g, '_') || 'Document';
@@ -25,7 +26,7 @@ const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => 
   res.status(err.status || 500).json({ error: err.message || 'Request failed' });
 });
 
-export function createApiRouter({ tts = synthesizeSpeech, editor = generateEditorialRevision } = {}) {
+export function createApiRouter({ tts = synthesizeSpeech, editor = generateEditorialRevision, reviewer = generateReview, grammar = checkParagraphs } = {}) {
   const router = express.Router();
 
   router.get('/health', (req, res) => res.json({ ok: true }));
@@ -87,7 +88,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     if (format === 'md') {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="${name}.md"`);
-      return res.send(documentAsMarkdown(doc));
+      return res.send(documentAsMarkdown(doc, { includeComments: req.query.comments !== '0' }));
     }
     if (format === 'mp3') {
       const cfg = getConfig();
@@ -105,6 +106,8 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
       paragraphs: doc.paragraphs,
       fontFamily: doc.style === 'academic' ? 'Times New Roman' : 'Arial',
       doubleSpaced: true,
+      comments: req.query.comments === '0' ? [] : doc.comments || [],
+      author: getConfig().reviewerName || 'Reviewer',
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
     res.setHeader('Content-Disposition', `attachment; filename="${name}.docx"`);
@@ -135,6 +138,25 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
   router.post('/edit', wrap(async (req, res) => {
     const cfg = getConfig();
     const b = req.body || {};
+    // Offline proofreading: apply the local grammar checker's first suggestion for each correctness issue.
+    if (b.action === 'proofread' && !cfg.apiKey) {
+      const target = String(b.targetText || '');
+      const fixable = new Set(['Spelling', 'Typo', 'Grammar', 'Agreement', 'Repetition', 'BoundaryError', 'Capitalization', 'Punctuation', 'Miscellaneous', 'Usage', 'WordChoice']);
+      const issues = (await grammar([target], { userDictionary: cfg.dictionary || [] }))
+        .filter((i) => fixable.has(i.kind) && i.suggestions.length)
+        .sort((a, b2) => b2.start - a.start);
+      let fixed = target;
+      let last = Infinity;
+      for (const i of issues) {
+        if (i.end > last) continue; // skip overlaps
+        fixed = fixed.slice(0, i.start) + i.suggestions[0] + fixed.slice(i.end);
+        last = i.start;
+      }
+      const n = issues.length;
+      return res.json(fixed !== target
+        ? { proposedText: fixed, rationale: `Fixed ${n} spelling or grammar issue${n === 1 ? '' : 's'} with the local checker. Words that are wrong but correctly spelled need a Gemini key to catch.`, spokenReply: `I fixed ${n} issue${n === 1 ? '' : 's'}. Have a look.`, source: 'offline' }
+        : { proposedText: '', rationale: 'The local checker found nothing to fix here.', spokenReply: 'I did not find any errors.', source: 'offline' });
+    }
     res.json(
       await editor({
         apiKey: cfg.apiKey,
@@ -146,6 +168,26 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
         style: b.style || 'narrative',
       })
     );
+  }));
+
+  router.post('/grammar', wrap(async (req, res) => {
+    const paragraphs = Array.isArray(req.body?.paragraphs) ? req.body.paragraphs.map((t) => String(t ?? '')) : [];
+    res.json({ issues: await grammar(paragraphs, { userDictionary: getConfig().dictionary || [] }) });
+  }));
+
+  // Personal dictionary: add or remove a word.
+  router.post('/dictionary', (req, res) => {
+    const word = String(req.body?.word || '').trim();
+    const cfg = getConfig();
+    const set = new Set(cfg.dictionary || []);
+    if (word) req.body?.remove ? set.delete(word) : set.add(word);
+    res.json(publicConfig(saveConfig({ dictionary: [...set].sort((a, b) => a.localeCompare(b)) })));
+  });
+
+  router.post('/review', wrap(async (req, res) => {
+    const cfg = getConfig();
+    const paragraphs = (req.body?.paragraphs || []).map((p) => ({ type: p.type === 'heading' ? 'heading' : 'body', text: String(p.text || '') }));
+    res.json(await reviewer({ apiKey: cfg.apiKey, model: cfg.textModel, paragraphs, style: req.body?.style || 'narrative' }));
   }));
 
   return router;

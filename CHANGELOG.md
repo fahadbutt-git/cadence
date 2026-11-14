@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.2.0
+
+- Comments: notes on the whole document, a paragraph, or a selected phrase. Add them from the Comments tab, the selection toolbar, Cmd+Option+M, or by voice ("comment ...", "general comment ..."). Margin counts show where they are. Resolve, reopen, delete, or turn one into a suggested edit.
+- Editor feedback: one click adds mentor-style comments on each paragraph and the whole piece (clear takeaway, no lists without a point, ties to the story and the specialty, a real conclusion). Full feedback with a Gemini key, surface checks offline.
+- Word export keeps comments as real Word comments under your name, with a clean copy option. Markdown export lists them at the end.
+- Spelling and grammar checking on this Mac with Harper, in Canadian English. Click an underline for fixes, ignore it, or add the word to your dictionary. Clinical terms are preloaded.
+- Proofread action: fixes only errors, including wrong words that are spelled correctly when a Gemini key is set.
+- More style checks: long and very long sentences, passive voice, adverbs, filler words, hedges, clichés, repeated words nearby, and repeated sentence openings, in groups you can switch off. Reading grade level and character count.
+- Find and replace (Cmd+F), focus mode (Cmd+Shift+F), and side-by-side comparison of saved versions.
+
 ## 3.1.0
 
 - Talk mode: the microphone stays open while Cadence reads. Speaking pauses it, the request is carried out, and "continue" resumes from the paused sentence, including after an accepted edit.

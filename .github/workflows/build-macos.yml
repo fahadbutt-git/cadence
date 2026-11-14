@@ -40,6 +40,9 @@ jobs:
           CADENCE_DATA_DIR="$RUNNER_TEMP/cadence-data" PORT=3990 "$RES/node/bin/node" "$RES/app/server.js" &
           for i in $(seq 1 40); do curl -fs http://127.0.0.1:3990/api/health && break; sleep 0.25; done
           curl -fs http://127.0.0.1:3990/api/documents | head -c 300
+          echo
+          # The grammar checker must load from inside the app.
+          curl -fs -X POST -H 'Content-Type: application/json' -d '{"paragraphs":["I has a idea tomorow."]}' http://127.0.0.1:3990/api/grammar | tee /dev/stderr | grep -q tomorow
           kill %1
 
       - name: Zip

@@ -59,6 +59,10 @@ export function getDefaultConfig() {
     ttsModel: 'gemini-3.8-flash-tts',
     themePreference: 'system',
     showFlags: true,
+    reviewerName: '',
+    grammarCheck: true,
+    checkGroups: { house: true, clarity: true, style: true },
+    dictionary: [],
     pronunciations: [],
     lastOpenedDocId: null,
   };
@@ -88,6 +92,15 @@ export function sanitizeConfigPatch(patch = {}) {
           .slice(0, 200)
       : [];
   }
+  if (out.dictionary !== undefined) {
+    out.dictionary = Array.isArray(out.dictionary) ? [...new Set(out.dictionary.map((w) => String(w).trim()).filter((w) => w && w.length <= 60))].slice(0, 5000) : [];
+  }
+  if (out.checkGroups !== undefined) {
+    const g = out.checkGroups || {};
+    out.checkGroups = { house: g.house !== false, clarity: g.clarity !== false, style: g.style !== false };
+  }
+  if (out.grammarCheck !== undefined) out.grammarCheck = Boolean(out.grammarCheck);
+  if (out.reviewerName !== undefined) out.reviewerName = String(out.reviewerName || '').trim().slice(0, 80);
   if (out.themePreference !== undefined && !['system', 'light', 'dark'].includes(out.themePreference)) {
     out.themePreference = 'system';
   }

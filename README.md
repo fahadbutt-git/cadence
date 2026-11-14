@@ -44,7 +44,10 @@ npm run app          # development build of the app, runs from this folder
 - Select text to get a small toolbar: Listen, Tighten, Clean up, Rewrite, Heading.
 - Suggestions appear under their paragraph with the change marked. Accept (Cmd+Enter), Listen or Reject. Cmd+Z undoes an accepted edit.
 - **Talk** (Option+M, or the Talk button) keeps the microphone open while Cadence reads. Speak at any time: it pauses, acts on what you said, and picks back up when you say "continue". Commands include continue, pause, back, next, repeat, start over, go to paragraph three, faster, slower, accept, reject, read it, undo, what is flagged, save a version, help and stop listening. Anything else is treated as an edit to the sentence you interrupted ("tighten this", "replace pivotal with important", "make the ending more concrete"). Cadence ignores its own reading voice, but headphones make it more reliable.
-- Checks lists stock AI words, dashes, semicolons, contrast frames and "-ing" explanation tails. Click one to jump to it.
+- **Comments.** Leave notes on the whole document, a paragraph or a phrase (Comments tab, the selection toolbar, Cmd+Option+M, or say "comment ..." while Talk is on). Get editor feedback adds mentor-style comments for you. Suggest edit turns a comment into a proposed change. Word export keeps them as real Word comments.
+- **Spelling and grammar** are checked on this Mac with [Harper](https://writewithharper.com) in Canadian English. Click an underline for fixes. Add names and terms to your dictionary.
+- **Checks** also covers stock AI phrasing (dashes, semicolons, contrast frames, "-ing" tails), clarity (long sentences, passive voice, adverbs, fillers, hedges) and style (clichés, repeated words, repeated openings), with a reading grade level. Each group can be switched off.
+- **Find and replace** (Cmd+F), **focus mode** (Cmd+Shift+F), and **compare** any saved version with the current draft.
 - History keeps saved versions. Restoring one saves the current text first.
 - Export as Word (.docx, Arial or Times New Roman 12 pt, double spaced, no author metadata), Markdown, or an MP3 of the whole document. Exports go to Downloads.
 

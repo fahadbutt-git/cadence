@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import mammoth from 'mammoth';
-import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel } from 'docx';
+import { Document, Packer, Paragraph, TextRun, AlignmentType, HeadingLevel, CommentRangeStart, CommentRangeEnd, CommentReference } from 'docx';
 import { DOCS_DIR, REVISIONS_DIR, ensureDataDirectories } from '../config/configService.js';
 
 const MAX_REVISIONS = 40;
@@ -12,6 +12,25 @@ const safeId = (id = '') => String(id).replace(/[^a-zA-Z0-9_-]/g, '');
 export function normalizeStyle(raw = {}) {
   if (raw.style === 'academic' || raw.style === 'narrative') return raw.style;
   return raw.mode === 'mode2' ? 'academic' : 'narrative';
+}
+
+/**
+ * Comments: { id, paraId (null for a general comment), quote (optional exact text), text, createdAt, resolved }.
+ */
+export function sanitizeComments(list = [], paragraphs = []) {
+  if (!Array.isArray(list)) return [];
+  const ids = new Set(paragraphs.map((p) => p.id));
+  return list
+    .filter((c) => c && typeof c.text === 'string' && c.text.trim())
+    .map((c) => ({
+      id: String(c.id || uid('c')),
+      paraId: c.paraId && ids.has(c.paraId) ? c.paraId : null,
+      quote: c.paraId && ids.has(c.paraId) && typeof c.quote === 'string' ? c.quote.slice(0, 2000) : '',
+      text: c.text.trim().slice(0, 5000),
+      createdAt: c.createdAt || new Date().toISOString(),
+      resolved: Boolean(c.resolved),
+    }))
+    .slice(0, 1000);
 }
 
 export function computeWordCount(paragraphs = []) {
@@ -40,6 +59,7 @@ export function computeDocumentMetadata(raw) {
       updatedAt: bm.updatedAt || raw.updatedAt,
     },
     progressPct: paragraphs.length ? Math.min(100, Math.round((paraIndex / paragraphs.length) * 100)) : 0,
+    openComments: (raw.comments || []).filter((c) => !c.resolved).length,
   };
 }
 
@@ -97,7 +117,7 @@ export function saveSnapshot(doc, reason = 'Checkpoint', revisionsDir = REVISION
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const createdAt = new Date().toISOString();
   const revId = `rev-${createdAt.replace(/[:.]/g, '-')}`;
-  const snapshot = { revId, docId: doc.id, reason, createdAt, title: doc.title, paragraphs: doc.paragraphs, wordCount: computeWordCount(doc.paragraphs || []) };
+  const snapshot = { revId, docId: doc.id, reason, createdAt, title: doc.title, paragraphs: doc.paragraphs, comments: doc.comments || [], wordCount: computeWordCount(doc.paragraphs || []) };
   writeJson(path.join(dir, `${revId}.json`), snapshot);
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
   for (const old of files.slice(0, Math.max(0, files.length - MAX_REVISIONS))) {
@@ -126,6 +146,7 @@ export function upsertDocument(payload = {}, docsDir = DOCS_DIR, revisionsDir = 
     updatedAt: new Date().toISOString(),
     paragraphs: paragraphs.length ? paragraphs : [{ id: uid(), type: 'body', text: '' }],
   };
+  doc.comments = sanitizeComments(payload.comments !== undefined ? payload.comments : existing?.comments || [], doc.paragraphs);
   writeJson(file, doc);
   if (payload.createSnapshot) saveSnapshot(doc, payload.snapshotReason || 'Checkpoint', revisionsDir);
   return doc;
@@ -210,27 +231,90 @@ export async function importDocumentFromFile(filePath, originalName, docsDir = D
   );
 }
 
-export async function generateCleanDocxBuffer({ title = 'Document', paragraphs = [], fontFamily = 'Arial', doubleSpaced = true }) {
+/** Character ranges [start, end) for each comment inside a paragraph's text. Unmatched quotes cover the paragraph. */
+export function commentRanges(text = '', comments = []) {
+  return comments.map((c) => {
+    const at = c.quote ? text.indexOf(c.quote) : -1;
+    return at >= 0 ? { c, start: at, end: at + c.quote.length } : { c, start: 0, end: text.length };
+  });
+}
+
+function runsWithComments(text, ranges, idOf, run) {
+  if (!ranges.length) return [run(text)];
+  const cuts = [...new Set([0, text.length, ...ranges.flatMap((r) => [r.start, r.end])])].sort((x, y) => x - y);
+  const out = [];
+  for (let i = 0; i < cuts.length; i++) {
+    const at = cuts[i];
+    for (const r of ranges.filter((x) => x.end === at && x.start !== at)) {
+      out.push(new CommentRangeEnd(idOf(r.c)));
+      out.push(new TextRun({ children: [new CommentReference(idOf(r.c))] }));
+    }
+    for (const r of ranges.filter((x) => x.start === at)) out.push(new CommentRangeStart(idOf(r.c)));
+    // Zero-length range (empty paragraph): close it straight away.
+    for (const r of ranges.filter((x) => x.start === at && x.end === at)) {
+      out.push(new CommentRangeEnd(idOf(r.c)));
+      out.push(new TextRun({ children: [new CommentReference(idOf(r.c))] }));
+    }
+    if (i < cuts.length - 1 && cuts[i + 1] > at) out.push(run(text.slice(at, cuts[i + 1])));
+  }
+  return out;
+}
+
+export async function generateCleanDocxBuffer({ title = 'Document', paragraphs = [], fontFamily = 'Arial', doubleSpaced = true, comments = [], author = 'Reviewer' }) {
   const line = doubleSpaced ? 480 : 276;
-  const children = paragraphs.map((p) =>
-    new Paragraph({
+  const open = (comments || []).filter((c) => c && c.text && !c.resolved);
+  const ids = new Map(open.map((c, i) => [c.id, i]));
+  const idOf = (c) => ids.get(c.id);
+  const firstId = paragraphs[0]?.id;
+  const children = paragraphs.map((p) => {
+    const mine = open.filter((c) => c.paraId === p.id || (!c.paraId && p.id === firstId));
+    const ranges = commentRanges(p.text || '', mine).map((r) => (r.c.paraId ? r : { ...r, start: 0, end: (p.text || '').length }));
+    const run = (t) => new TextRun({ text: t, font: fontFamily, size: 24, bold: p.type === 'heading', color: '000000' });
+    return new Paragraph({
       alignment: AlignmentType.LEFT,
       heading: p.type === 'heading' ? HeadingLevel.HEADING_1 : undefined,
       spacing: { line, after: 0 },
-      children: [new TextRun({ text: p.text || '', font: fontFamily, size: 24, bold: p.type === 'heading', color: '000000' })],
-    })
-  );
+      children: runsWithComments(p.text || '', ranges, idOf, run),
+    });
+  });
+  const initials = (author || 'R').split(/\s+/).map((w) => w[0]).join('').slice(0, 3).toUpperCase();
   const doc = new Document({
     creator: '',
     lastModifiedBy: '',
     title: title || 'Document',
     description: '',
     styles: { default: { document: { run: { font: fontFamily, size: 24 } } } },
+    comments: {
+      children: open.map((c) => ({
+        id: idOf(c),
+        author: author || 'Reviewer',
+        initials,
+        date: new Date(c.createdAt || Date.now()),
+        children: [new Paragraph({ children: [new TextRun({ text: c.paraId ? c.text : `General comment: ${c.text}` })] })],
+      })),
+    },
     sections: [{ properties: {}, children }],
   });
   return Packer.toBuffer(doc);
 }
 
-export function documentAsMarkdown(doc) {
-  return (doc.paragraphs || []).map((p) => (p.type === 'heading' ? `## ${p.text}` : p.text)).join('\n\n') + '\n';
+export function documentAsMarkdown(doc, { includeComments = true } = {}) {
+  const body = (doc.paragraphs || []).map((p) => (p.type === 'heading' ? `## ${p.text}` : p.text)).join('\n\n') + '\n';
+  const open = (doc.comments || []).filter((c) => !c.resolved);
+  if (!includeComments || !open.length) return body;
+  const lines = ['', '---', '', '## Comments', ''];
+  const general = open.filter((c) => !c.paraId);
+  if (general.length) {
+    lines.push('### General', '');
+    general.forEach((c) => lines.push(`- ${c.text}`));
+    lines.push('');
+  }
+  (doc.paragraphs || []).forEach((p, i) => {
+    const mine = open.filter((c) => c.paraId === p.id);
+    if (!mine.length) return;
+    lines.push(`### Paragraph ${i + 1}`, '');
+    mine.forEach((c) => lines.push(c.quote ? `- On "${c.quote}": ${c.text}` : `- ${c.text}`));
+    lines.push('');
+  });
+  return body + lines.join('\n');
 }

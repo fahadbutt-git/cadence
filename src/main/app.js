@@ -3,10 +3,12 @@ import path from 'node:path';
 import { ROOT_DIR, ensureDataDirectories } from './domains/config/configService.js';
 import { ensureStarterDocuments } from './domains/projects/projectRepository.js';
 import { createApiRouter } from './routes/apiRouter.js';
+import { warmUp } from './domains/language/grammarService.js';
 
 export function createApp(options = {}) {
   ensureDataDirectories();
   ensureStarterDocuments();
+  if (!options.grammar) warmUp();
 
   const app = express();
   app.disable('x-powered-by');
