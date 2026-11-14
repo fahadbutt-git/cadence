@@ -10,9 +10,19 @@ Listen to your writing, edit it by selection or by voice, and review every sugge
    `xattr -dr com.apple.quarantine /Applications/Cadence.app`
 4. Open Cadence.
 
+**Updates.** Cadence checks GitHub for a new release a few seconds after launch, and from Cadence, Check for Updates. Choose Install and Relaunch: it downloads the new version, swaps itself in Applications and reopens. Your documents are untouched because they live outside the app.
+
 The app carries its own Node runtime and server, so nothing else needs installing. Documents live in `~/Library/Application Support/Cadence/data`. On first launch it copies documents and settings from the original project folder if they exist. The server only listens on this Mac (127.0.0.1).
 
-New releases are built by GitHub Actions on a Mac whenever a `v*` tag is pushed. Every push to `main` also builds the app and keeps it as a downloadable artifact.
+## Releasing
+
+Everything is version controlled in this repository. To ship a change:
+
+1. Commit the change.
+2. Bump `version` in `package.json` and add an entry to `CHANGELOG.md`.
+3. Push to `main`.
+
+GitHub Actions builds the app on a Mac, runs the tests, checks that the packed server starts, and publishes release `v<version>` with the zip attached. Installed copies pick it up through Check for Updates.
 
 ## Develop
 
@@ -33,7 +43,7 @@ npm run app          # development build of the app, runs from this folder
 - The strip in the player shows every sentence as a bar sized by its length, so you can see the rhythm of the piece. Orange bars contain a flagged phrase. Click any bar to listen from there.
 - Select text to get a small toolbar: Listen, Tighten, Clean up, Rewrite, Heading.
 - Suggestions appear under their paragraph with the change marked. Accept (Cmd+Enter), Listen or Reject. Cmd+Z undoes an accepted edit.
-- Press Option+M or Speak and say an instruction ("replace pivotal with important", "make the ending more concrete"). While reading, the instruction applies to the sentence that was playing. You can also say "read", "stop", "next", "accept", "reject" or "undo".
+- **Talk** (Option+M, or the Talk button) keeps the microphone open while Cadence reads. Speak at any time: it pauses, acts on what you said, and picks back up when you say "continue". Commands include continue, pause, back, next, repeat, start over, go to paragraph three, faster, slower, accept, reject, read it, undo, what is flagged, save a version, help and stop listening. Anything else is treated as an edit to the sentence you interrupted ("tighten this", "replace pivotal with important", "make the ending more concrete"). Cadence ignores its own reading voice, but headphones make it more reliable.
 - Checks lists stock AI words, dashes, semicolons, contrast frames and "-ing" explanation tails. Click one to jump to it.
 - History keeps saved versions. Restoring one saves the current text first.
 - Export as Word (.docx, Arial or Times New Roman 12 pt, double spaced, no author metadata), Markdown, or an MP3 of the whole document. Exports go to Downloads.

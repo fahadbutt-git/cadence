@@ -3,6 +3,7 @@ import { buildSentenceReadQueue, computeBurstinessStats, computeWordDiffHtml, es
 import { Editor } from './js/editor.js';
 import { Player } from './js/player.js';
 import { Dictation } from './js/dictation.js';
+import { parseCommand, isBargeIn, cleanTranscript, VOICE_HELP } from './js/core/voiceCommands.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -90,7 +91,7 @@ function saveConfig(patch) {
 function showLibrary() {
   if (state.doc) flushSave();
   player.stop();
-  dictation.stop();
+  stopTalk();
   $('#editorView').hidden = true;
   $('#libraryView').hidden = false;
   document.title = 'Cadence';
@@ -424,7 +425,7 @@ $('#strip').addEventListener('click', (e) => {
 // ---------- Reading ----------
 
 function startReading(from = editor.readingStart()) {
-  dictation.stop();
+  if (!talk.on) dictation.stop();
   const queue = buildSentenceReadQueue(editor.paragraphs, from.paraIndex, from.sentIndex);
   if (!queue.length) return toast('Nothing to read from here.');
   player.play(queue);
@@ -447,6 +448,9 @@ player.addEventListener('sentence', (e) => {
     t.classList.toggle('done', i < idx);
   });
   saveBookmark(item);
+  talk.lastReadAt = Date.now();
+  state.pausePoint = { paraIndex: item.paraIndex, sentIndex: item.sentIndex };
+  if (talk.on) caption('cadence', `Reading paragraph ${item.paraIndex + 1}`);
 });
 
 player.addEventListener('state', (e) => {
@@ -456,6 +460,7 @@ player.addEventListener('state', (e) => {
   if (!playing && state.doc) {
     const item = player.current;
     if (item) {
+      state.pausePoint = { paraIndex: item.paraIndex, sentIndex: item.sentIndex };
       saveBookmark(item, true);
       // Leave the caret where reading stopped so play resumes there.
       editor.clearReadingHighlight();
@@ -504,7 +509,7 @@ function updateTargetLabel() {
   $('#targetLabel').textContent = t.kind === 'selection' ? `Working on your selection in paragraph ${t.index + 1}` : `Working on paragraph ${t.index + 1}`;
 }
 
-async function requestEdit(action, instruction = '', { target = currentTarget(), speak = false } = {}) {
+async function requestEdit(action, instruction = '', { target = currentTarget(), speak = false, conversational = false } = {}) {
   if (!target || (!target.text.trim() && action !== 'ask')) return toast('Put the cursor in a paragraph or select some text first.');
   if (state.pendingAi) return;
   state.pendingAi = true;
@@ -538,7 +543,10 @@ async function requestEdit(action, instruction = '', { target = currentTarget(),
     } else if (res.rationale) {
       toast(res.rationale);
     }
-    if (speak && (res.spokenReply || res.rationale)) player.say(res.spokenReply || res.rationale);
+    if (speak && (res.spokenReply || res.rationale)) {
+      const tail = conversational && res.proposedText ? ' Say accept, read it, or reject. Then say continue.' : '';
+      (conversational ? say : (t) => player.say(t))((res.spokenReply || res.rationale) + tail);
+    }
   } catch (e) {
     note.hidden = true;
     toast(e.message, 'error');
@@ -659,53 +667,219 @@ $('#askForm').addEventListener('submit', (e) => {
   requestEdit(isQuestionText(text) ? 'ask' : 'rewrite', text, { target }).then(() => { $('#askInput').value = ''; });
 });
 
-// ---------- Voice commands ----------
+// ---------- Conversation mode ----------
+// Talk keeps the microphone open. Speaking while Cadence reads pauses it (barge-in),
+// the utterance is parsed into a command or an edit, and "continue" resumes from the paused sentence.
 
-function handleVoiceCommand(text) {
-  const t = text.trim().toLowerCase().replace(/[.!?]+$/, '');
-  if (/^(stop|pause)( reading)?$/.test(t)) return player.pause();
-  if (/^(read|play|continue|resume|keep going)( (it|aloud|from here))?$/.test(t)) return startReading();
-  if (/^(next|skip)( sentence)?$/.test(t)) return player.jump(1);
-  if (/^(back|previous|go back|repeat( that)?)( sentence)?$/.test(t)) return player.queue.length ? (t.startsWith('repeat') ? player.jump(0) : player.jump(-1)) : null;
-  if (/^(accept|accept it|accept that|yes)$/.test(t)) {
-    const idx = editor.getCaret()?.index ?? editor.currentIndex;
-    const s = editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || editor.suggestions.at(-1);
-    return s ? handleSuggestion(s.id, 'accept') : toast('No suggestion to accept.');
-  }
-  if (/^(reject|reject it|discard|no)$/.test(t)) {
-    const s = editor.suggestions.at(-1);
-    return s ? handleSuggestion(s.id, 'reject') : null;
-  }
-  if (/^undo( that)?$/.test(t)) return editor.undo();
-  $('#askInput').value = text;
-  // Edit the sentence that was being read if reading was interrupted, otherwise the selection or paragraph.
-  let target = currentTarget();
+const talk = { on: false, lastSaid: '', lastReadAt: 0, bargeCtx: null };
+
+function caption(who, text) {
+  const el = $('#caption');
+  if (!talk.on && who !== 'cadence') { el.hidden = true; return; }
+  el.hidden = !text;
+  el.dataset.who = who;
+  $('#captionWho').textContent = who === 'you' ? 'You' : who === 'cadence' ? 'Cadence' : '';
+  $('#captionText').textContent = text;
+}
+
+function say(text) {
+  if (!text) return;
+  talk.lastSaid = text;
+  caption('cadence', text);
+  player.say(text);
+}
+
+// What Cadence is saying right now, which the microphone may also be hearing.
+function echoContext() {
+  const ctx = [];
+  if (!player.playing && !player.audio.paused) ctx.push(talk.lastSaid); // a spoken reply is playing
   const item = player.current;
-  if (wasReadingWhenListening && item) {
-    target = { index: item.paraIndex, start: item.start, end: item.end, text: item.text, kind: 'sentence' };
+  if (item) {
+    ctx.push(item.text);
+    const prev = player.queue[player.cursor - 1];
+    const next = player.queue[player.cursor + 1];
+    if (prev) ctx.push(prev.text);
+    if (next) ctx.push(next.text);
   }
-  requestEdit(isQuestionText(text) ? 'ask' : 'rewrite', text, { target, speak: true }).then(() => { $('#askInput').value = ''; });
+  return ctx;
 }
 
-let wasReadingWhenListening = false;
-function toggleMic() {
-  if (!dictation.listening) {
-    wasReadingWhenListening = player.playing;
-    player.pause();
-    openPanel('edit');
-  }
-  dictation.toggle();
+function resumeFromPause() {
+  const p = state.pausePoint;
+  if (p && p.paraIndex < editor.paragraphs.length) startReading({ paraIndex: p.paraIndex, sentIndex: p.sentIndex });
+  else startReading();
 }
+
+function moveSentence(delta) {
+  const all = buildSentenceReadQueue(editor.paragraphs, 0, 0);
+  if (!all.length) return;
+  const p = state.pausePoint || editor.readingStart();
+  let i = all.findIndex((s) => s.paraIndex === p.paraIndex && s.sentIndex === p.sentIndex);
+  if (i < 0) i = 0;
+  const t = all[Math.max(0, Math.min(all.length - 1, i + delta))];
+  startReading({ paraIndex: t.paraIndex, sentIndex: t.sentIndex });
+}
+
+function goToParagraph(index) {
+  const n = editor.paragraphs.length;
+  const i = index < 0 ? n - 1 : Math.max(0, Math.min(n - 1, index));
+  startReading({ paraIndex: i, sentIndex: 0 });
+}
+
+function stepRate(dir) {
+  const opts = [...$('#rateSelect').options].map((o) => o.value);
+  const i = opts.indexOf($('#rateSelect').value);
+  const next = opts[Math.max(0, Math.min(opts.length - 1, i + dir))];
+  $('#rateSelect').value = next;
+  $('#rateSelect').dispatchEvent(new Event('change'));
+  return next;
+}
+
+/** Target for a spoken edit: selection, the sentence just read, or the paragraph at the caret. */
+function voiceTarget(scope) {
+  const sel = editor.getSelectionInfo();
+  if ((scope === 'selection' || scope === 'auto') && sel && !sel.multi) {
+    return { index: sel.index, start: sel.start, end: sel.end, text: sel.text, kind: 'selection' };
+  }
+  const p = state.pausePoint;
+  const recentlyRead = p && Date.now() - talk.lastReadAt < 10 * 60 * 1000;
+  if (p && (scope === 'sentence' || (scope === 'auto' && recentlyRead))) {
+    const para = editor.paragraphs[p.paraIndex];
+    const r = para && buildSentenceReadQueue([para], 0, p.sentIndex)[0];
+    if (r) return { index: p.paraIndex, start: r.start, end: r.end, text: r.text, kind: 'sentence' };
+  }
+  const index = p && (scope === 'paragraph' || recentlyRead) ? p.paraIndex : Math.max(0, editor.getCaret()?.index ?? editor.currentIndex);
+  const para = editor.paragraphs[index];
+  return para ? { index, start: 0, end: para.text.length, text: para.text, kind: 'paragraph' } : null;
+}
+
+function suggestionHere() {
+  const p = state.pausePoint;
+  const idx = p ? p.paraIndex : editor.getCaret()?.index ?? editor.currentIndex;
+  return editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || editor.suggestions.at(-1);
+}
+
+async function runCommand(cmd, heard) {
+  switch (cmd.type) {
+    case 'none': return;
+    case 'pause': player.pause(); return say('Paused.');
+    case 'resume': caption('cadence', 'Reading'); return resumeFromPause();
+    case 'restart': return goToParagraph(0);
+    case 'next': return moveSentence(1);
+    case 'prev': return moveSentence(-1);
+    case 'repeat': return moveSentence(0);
+    case 'nextParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) + 1);
+    case 'prevParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) - 1);
+    case 'gotoParagraph': return goToParagraph(cmd.n < 0 ? -1 : cmd.n - 1);
+    case 'accept': {
+      const s = suggestionHere();
+      if (!s) return say('There is no suggestion to accept.');
+      handleSuggestion(s.id, 'accept');
+      return say('Done. Say continue when you are ready.');
+    }
+    case 'reject': {
+      const s = suggestionHere();
+      if (!s) return say('Nothing to reject.');
+      handleSuggestion(s.id, 'reject');
+      return say('Kept the original.');
+    }
+    case 'readSuggestion': {
+      const s = suggestionHere();
+      return s ? say(s.proposed) : resumeFromPause();
+    }
+    case 'undo': return editor.undo() ? say('Undone.') : say('Nothing to undo.');
+    case 'redo': return editor.redo() ? say('Redone.') : say('Nothing to redo.');
+    case 'faster': return say(`Speed ${stepRate(1)}.`);
+    case 'slower': return say(`Speed ${stepRate(-1)}.`);
+    case 'flags': {
+      const idx = state.pausePoint?.paraIndex ?? editor.currentIndex;
+      const f = editor.collectFlags().filter((x) => x.index === idx);
+      return say(f.length ? `${f.length} flagged in this paragraph: ${[...new Set(f.map((x) => x.text.replace(/^[,\s]+/, '')))].slice(0, 5).join(', ')}.` : 'Nothing flagged in this paragraph.');
+    }
+    case 'snapshot':
+      state.dirty = true;
+      await flushSave({ createSnapshot: true, snapshotReason: 'Saved by voice' });
+      return say('Version saved.');
+    case 'stopTalking': stopTalk(); return say('Okay. Talk is off.');
+    case 'help': return say(VOICE_HELP);
+    case 'ask':
+    case 'edit': {
+      let target = voiceTarget(cmd.scope);
+      if (!target) return say('Put the cursor in a paragraph first.');
+      // "Replace X with Y": widen to the paragraph, then the document, when X is not in the target.
+      const named = cmd.type === 'edit' && cmd.instruction.match(/\b(?:replace|change|swap|delete|remove|cut)\s+["“']?(.+?)["”']?(?:\s+(?:with|to|for)\s|$)/i);
+      if (named && !target.text.toLowerCase().includes(named[1].toLowerCase())) {
+        const want = named[1].toLowerCase();
+        const order = [target.index, ...editor.paragraphs.map((_, i) => i).filter((i) => i !== target.index)];
+        const hit = order.find((i) => editor.paragraphs[i].text.toLowerCase().includes(want));
+        if (hit === undefined) return say(`I could not find ${named[1]} in the document.`);
+        const para = editor.paragraphs[hit];
+        target = { index: hit, start: 0, end: para.text.length, text: para.text, kind: 'paragraph' };
+      }
+      caption('cadence', cmd.type === 'ask' ? 'Thinking' : `Working on the ${target.kind}`);
+      $('#askInput').value = heard;
+      await requestEdit(cmd.type === 'ask' ? 'ask' : cmd.action, cmd.type === 'ask' ? cmd.question : cmd.instruction, { target, speak: true, conversational: true });
+      $('#askInput').value = '';
+      return;
+    }
+    default: return;
+  }
+}
+
+function startTalk() {
+  if (!dictation.available) return toast('Voice input needs the Cadence app, Safari or Chrome.', 'error');
+  talk.on = true;
+  dictation.start({ continuous: true });
+  setTalkUi(true);
+  caption('cadence', player.playing ? 'Listening. Talk any time to interrupt.' : 'Listening. Say continue to start reading, or tell me what to change.');
+}
+
+function stopTalk() {
+  talk.on = false;
+  dictation.stop();
+  setTalkUi(false);
+}
+
+function toggleTalk() {
+  return talk.on ? stopTalk() : startTalk();
+}
+
+function setTalkUi(on) {
+  for (const b of [$('#talkBtn'), $('#micBtn')]) b.setAttribute('aria-pressed', String(on));
+  $('#talkBtn span').textContent = on ? 'Talking' : 'Talk';
+  $('#micBtn span').textContent = on ? 'Talking' : 'Talk';
+  if (!on) $('#caption').hidden = true;
+}
+
 dictation.addEventListener('state', (e) => {
-  $('#micBtn').setAttribute('aria-pressed', String(e.detail));
-  $('#micBtn span').textContent = e.detail ? 'Listening' : 'Speak';
-  if (e.detail) $('#askInput').placeholder = 'Listening. Say an instruction, or "read", "stop", "accept".';
-  else $('#askInput').placeholder = 'Tell Cadence what to change, or ask a question. Example: make the ending more concrete';
+  if (!e.detail && talk.on) { talk.on = false; setTalkUi(false); }
 });
-dictation.addEventListener('partial', (e) => { $('#askInput').value = e.detail; });
-dictation.addEventListener('final', (e) => handleVoiceCommand(e.detail));
+dictation.addEventListener('partial', (e) => {
+  const text = e.detail;
+  if (!talk.on) { $('#askInput').value = text; return; }
+  const speaking = player.playing || !player.audio.paused;
+  if (speaking) {
+    const ctx = echoContext();
+    if (!isBargeIn(text, ctx)) return; // the microphone is hearing Cadence's own voice
+    talk.bargeCtx = ctx; // keep it to strip the echo from the final transcript
+    player.pause();
+    player.stopAudio();
+  }
+  caption('you', talk.bargeCtx ? cleanTranscript(text, talk.bargeCtx) : text);
+});
+dictation.addEventListener('final', (e) => {
+  const speaking = player.playing || !player.audio.paused;
+  if (talk.on && speaking && !isBargeIn(e.detail, echoContext())) return;
+  const ctx = talk.bargeCtx || (speaking ? echoContext() : []);
+  talk.bargeCtx = null;
+  const heard = ctx.length ? cleanTranscript(e.detail, ctx) : e.detail.trim();
+  if (!heard) return;
+  caption('you', heard);
+  runCommand(parseCommand(heard), heard);
+});
 dictation.addEventListener('error', (e) => toast(e.detail, 'error'));
-$('#micBtn').addEventListener('click', toggleMic);
+$('#micBtn').addEventListener('click', toggleTalk);
+$('#talkBtn').addEventListener('click', toggleTalk);
 
 // ---------- Panel ----------
 
@@ -873,7 +1047,7 @@ window.addEventListener('keydown', (e) => {
   if (!inEditor) return;
 
   if (e.altKey && (e.code === 'Space')) { e.preventDefault(); togglePlay(); return; }
-  if (e.altKey && e.code === 'KeyM') { e.preventDefault(); toggleMic(); return; }
+  if (e.altKey && e.code === 'KeyM') { e.preventDefault(); toggleTalk(); return; }
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPanel('edit'); $('#askInput').focus(); return; }
   if (mod && e.key === '\\') { e.preventDefault(); $('#panelToggle').click(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); state.dirty = true; flushSave(); return; }

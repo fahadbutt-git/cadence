@@ -80,6 +80,10 @@
     <div class="editor-body">
       <div class="desk" id="desk">
         <article id="paper" class="paper" aria-label="Document text"></article>
+        <div id="caption" class="caption" role="status" aria-live="polite" hidden>
+          <span id="captionWho" class="who"></span>
+          <span id="captionText"></span>
+        </div>
       </div>
 
       <aside id="panel" class="panel" aria-label="Side panel">
@@ -94,9 +98,9 @@
           <form id="askForm" class="ask">
             <textarea id="askInput" rows="3" placeholder="Tell Cadence what to change, or ask a question. Example: make the ending more concrete" aria-label="Instruction"></textarea>
             <div class="row between">
-              <button id="micBtn" class="btn mic" type="button" aria-pressed="false" title="Speak an instruction (Option+M)">
+              <button id="micBtn" class="btn talk" type="button" aria-pressed="false" title="Talk to Cadence (Option+M)">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="10" rx="3"/><path d="M4.5 10a5.5 5.5 0 0 0 11 0M10 15.5V18"/></svg>
-                <span>Speak</span>
+                <span>Talk</span>
               </button>
               <button class="btn primary" type="submit">Suggest edit</button>
             </div>
@@ -168,6 +172,10 @@
         <div id="strip" class="strip" role="slider" aria-label="Sentences in this document" tabindex="0"></div>
       </div>
       <div class="voice-controls">
+        <button class="btn talk" id="talkBtn" type="button" aria-pressed="false" title="Talk to Cadence while it reads (Option+M)">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="10" rx="3"/><path d="M4.5 10a5.5 5.5 0 0 0 11 0M10 15.5V18"/></svg>
+          <span>Talk</span>
+        </button>
         <select id="voiceSelect" aria-label="Voice"></select>
         <select id="rateSelect" aria-label="Speed">
           <option value="0.8">0.8×</option>
@@ -224,12 +232,21 @@
         <button type="button" class="btn subtle" id="addPronBtn">Add pronunciation</button>
       </fieldset>
       <details class="shortcuts">
+        <summary>Things you can say while Talk is on</summary>
+        <dl>
+          <dt>Reading</dt><dd>continue, pause, back, next, repeat, start over, go to paragraph three, next paragraph, faster, slower</dd>
+          <dt>Editing</dt><dd>tighten this sentence, clean up this paragraph, cut the ending, replace pivotal with important, or any instruction in your own words</dd>
+          <dt>Deciding</dt><dd>accept, reject, read it, undo</dd>
+          <dt>Other</dt><dd>what is flagged, save a version, help, stop listening</dd>
+        </dl>
+      </details>
+      <details class="shortcuts">
         <summary>Keyboard shortcuts</summary>
         <dl>
           <dt>Option+Space</dt><dd>Read from cursor or pause</dd>
-          <dt>Escape</dt><dd>Stop reading, close toolbar</dd>
+          <dt>Escape</dt><dd>Stop reading, close toolbar, turn Talk off</dd>
           <dt>[ and ]</dt><dd>Previous or next sentence while reading</dd>
-          <dt>Option+M</dt><dd>Speak an instruction</dd>
+          <dt>Option+M</dt><dd>Turn Talk on or off. While on, speak any time: it pauses, acts, and continues when you say continue</dd>
           <dt>Cmd+K</dt><dd>Type an instruction</dd>
           <dt>Cmd+Enter</dt><dd>Accept the suggestion for this paragraph</dd>
           <dt>Cmd+Z</dt><dd>Undo, including accepted suggestions</dd>

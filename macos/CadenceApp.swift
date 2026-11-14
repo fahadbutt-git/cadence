@@ -15,8 +15,17 @@ final class DictationController: NSObject {
     private var lastText = ""
     private var active = false
     private var silenceTimer: Timer?
+    // Conversation mode: keep listening after each utterance until the page turns it off.
+    private var continuous = false
+    private var wantListening = false
+    private var locale = "en-CA"
+    private var startedAt = Date()
+    private var quickFailures = 0
 
-    func start(locale: String) {
+    func start(locale: String, continuous: Bool = false) {
+        self.locale = locale
+        self.continuous = continuous
+        self.wantListening = true
         SFSpeechRecognizer.requestAuthorization { status in
             DispatchQueue.main.async {
                 guard status == .authorized else {
@@ -29,6 +38,7 @@ final class DictationController: NSObject {
                             self.send("error", "Microphone access is off for Cadence. Turn it on in System Settings, Privacy and Security, Microphone.")
                             return
                         }
+                        guard self.wantListening else { return }
                         self.begin(locale: locale)
                     }
                 }
@@ -73,12 +83,14 @@ final class DictationController: NSObject {
                         return
                     }
                     self.send("partial", self.lastText)
-                    self.armSilenceTimer(seconds: 1.6)
+                    self.armSilenceTimer(seconds: self.continuous ? 1.3 : 1.6)
                 }
                 if error != nil { self.finish() }
             }
         }
-        armSilenceTimer(seconds: 6.0)
+        startedAt = Date()
+        // Apple's recognizer caps one request at about a minute, so conversation mode recycles it.
+        armSilenceTimer(seconds: continuous ? 50.0 : 6.0)
     }
 
     // End of utterance: stop after a short pause in speech.
@@ -89,12 +101,40 @@ final class DictationController: NSObject {
         }
     }
 
+    // End of one utterance. In conversation mode, start listening again straight away.
     func finish() {
         guard active else { return }
         active = false
         let text = lastText.trimmingCharacters(in: .whitespacesAndNewlines)
         teardown()
-        send(text.isEmpty ? "end" : "final", text)
+        if !text.isEmpty { send("final", text) }
+        // Guard against a tight restart loop when the recognizer fails immediately.
+        quickFailures = (text.isEmpty && Date().timeIntervalSince(startedAt) < 1.0) ? quickFailures + 1 : 0
+        if quickFailures >= 3 {
+            quickFailures = 0
+            wantListening = false
+            send("error", "Listening stopped because speech recognition kept failing. Try turning Talk on again.")
+            return
+        }
+        if continuous && wantListening {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.wantListening else { return }
+                self.begin(locale: self.locale)
+            }
+        } else {
+            wantListening = false
+            send("end", "")
+        }
+    }
+
+    // Turn listening off entirely.
+    func stop() {
+        wantListening = false
+        if active {
+            finish()
+        } else {
+            send("end", "")
+        }
     }
 
     private func teardown() {
@@ -118,6 +158,161 @@ final class DictationController: NSObject {
     }
 }
 
+
+// MARK: - Updates from GitHub releases
+
+final class Updater {
+    static let repo = "fahadbutt-git/cadence"
+    weak var window: NSWindow?
+    var canReplaceSelf = false
+    private var busy = false
+
+    var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0"
+    }
+
+    static func isNewer(_ a: String, than b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// Automatic checks run at most every six hours; a menu check always runs and always answers.
+    func check(userInitiated: Bool) {
+        let defaults = UserDefaults.standard
+        if !userInitiated, let last = defaults.object(forKey: "lastUpdateCheck") as? Date, Date().timeIntervalSince(last) < 6 * 3600 { return }
+        guard !busy else { return }
+        busy = true
+        var req = URLRequest(url: URL(string: "https://api.github.com/repos/\(Updater.repo)/releases/latest")!)
+        req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        req.setValue("Cadence", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 15
+        URLSession.shared.dataTask(with: req) { data, response, _ in
+            DispatchQueue.main.async {
+                self.busy = false
+                defaults.set(Date(), forKey: "lastUpdateCheck")
+                guard (response as? HTTPURLResponse)?.statusCode == 200, let data = data,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let tag = json["tag_name"] as? String else {
+                    if userInitiated { self.alert("Could not check for updates", "GitHub did not answer. Check your connection and try again.") }
+                    return
+                }
+                let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+                let assets = json["assets"] as? [[String: Any]] ?? []
+                let zip = assets.first { ($0["name"] as? String ?? "").hasSuffix(".zip") }?["browser_download_url"] as? String
+                let page = json["html_url"] as? String ?? "https://github.com/\(Updater.repo)/releases"
+                guard Updater.isNewer(latest, than: self.currentVersion) else {
+                    if userInitiated { self.alert("Cadence is up to date", "You have version \(self.currentVersion), the latest release.") }
+                    return
+                }
+                self.offer(version: latest, notes: json["body"] as? String ?? "", zipURL: zip, page: page)
+            }
+        }.resume()
+    }
+
+    private func offer(version: String, notes: String, zipURL: String?, page: String) {
+        let a = NSAlert()
+        a.messageText = "Cadence \(version) is available"
+        let trimmed = notes.count > 600 ? String(notes.prefix(600)) + "…" : notes
+        a.informativeText = "You have version \(currentVersion).\n\n\(trimmed)"
+        let canInstall = canReplaceSelf && zipURL != nil
+        a.addButton(withTitle: canInstall ? "Install and Relaunch" : "Open Download Page")
+        a.addButton(withTitle: "Later")
+        let respond: (NSApplication.ModalResponse) -> Void = { r in
+            guard r == .alertFirstButtonReturn else { return }
+            if canInstall, let z = zipURL, let url = URL(string: z) {
+                self.install(from: url, page: page)
+            } else if let url = URL(string: page) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        if let w = window { a.beginSheetModal(for: w, completionHandler: respond) } else { respond(a.runModal()) }
+    }
+
+    private func install(from url: URL, page: String) {
+        busy = true
+        window?.title = "Cadence (downloading update)"
+        URLSession.shared.downloadTask(with: url) { tmp, response, error in
+            DispatchQueue.main.async {
+                self.busy = false
+                self.window?.title = "Cadence"
+                guard let tmp = tmp, error == nil, (response as? HTTPURLResponse)?.statusCode == 200 else {
+                    self.failed(page)
+                    return
+                }
+                self.replaceAndRelaunch(zip: tmp, page: page)
+            }
+        }.resume()
+    }
+
+    private func replaceAndRelaunch(zip: URL, page: String) {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("cadence-update-\(UUID().uuidString)")
+        try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+        let zipPath = work.appendingPathComponent("update.zip")
+        try? fm.moveItem(at: zip, to: zipPath)
+
+        let unzip = Process()
+        unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        unzip.arguments = ["-x", "-k", zipPath.path, work.path]
+        try? unzip.run()
+        unzip.waitUntilExit()
+
+        let newApp = work.appendingPathComponent("Cadence.app")
+        let dest = Bundle.main.bundleURL
+        guard unzip.terminationStatus == 0, fm.fileExists(atPath: newApp.path),
+              fm.isWritableFile(atPath: dest.deletingLastPathComponent().path) else {
+            failed(page)
+            return
+        }
+
+        // A helper script waits for this app to quit, swaps the bundle, and opens the new one.
+        let script = work.appendingPathComponent("swap.sh")
+        let body = """
+        #!/bin/bash
+        while kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null; do sleep 0.2; done
+        DEST='\(dest.path)'
+        rm -rf "$DEST.previous"
+        mv "$DEST" "$DEST.previous" && mv '\(newApp.path)' "$DEST" && rm -rf "$DEST.previous"
+        [ -d "$DEST" ] || mv "$DEST.previous" "$DEST"
+        xattr -dr com.apple.quarantine "$DEST" 2>/dev/null
+        open "$DEST"
+        """
+        try? body.write(to: script, atomically: true, encoding: .utf8)
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: "/bin/bash")
+        helper.arguments = ["-c", "nohup /bin/bash '\(script.path)' >/dev/null 2>&1 &"]
+        do {
+            try helper.run()
+            helper.waitUntilExit()
+            NSApp.terminate(nil)
+        } catch {
+            failed(page)
+        }
+    }
+
+    private func failed(_ page: String) {
+        let a = NSAlert()
+        a.messageText = "The update could not be installed"
+        a.informativeText = "You can download it from the release page and replace Cadence in Applications."
+        a.addButton(withTitle: "Open Download Page")
+        a.addButton(withTitle: "Cancel")
+        if a.runModal() == .alertFirstButtonReturn, let url = URL(string: page) { NSWorkspace.shared.open(url) }
+    }
+
+    private func alert(_ title: String, _ text: String) {
+        let a = NSAlert()
+        a.messageText = title
+        a.informativeText = text
+        if let w = window { a.beginSheetModal(for: w) } else { a.runModal() }
+    }
+}
+
 // MARK: - App
 
 @available(macOS 12.0, *)
@@ -126,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var webView: WKWebView!
     var serverProcess: Process?
     let dictation = DictationController()
+    let updater = Updater()
     // The installed app uses its own port so it never attaches to a development server.
     lazy var port: String = ProcessInfo.processInfo.environment["PORT"] ?? (bundledApp != nil ? "3848" : "3847")
     var serverURL: URL { URL(string: "http://127.0.0.1:\(port)")! }
@@ -188,6 +384,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView?.addSubview(webView)
         dictation.webView = webView
+        updater.window = window
+        updater.canReplaceSelf = bundledApp != nil
+        // Check quietly a few seconds after launch so startup stays fast.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in self?.updater.check(userInitiated: false) }
 
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -305,9 +505,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "cadenceDictation", let body = message.body as? [String: Any], let cmd = body["cmd"] as? String else { return }
         if cmd == "start" {
-            dictation.start(locale: body["locale"] as? String ?? "en-CA")
+            dictation.start(locale: body["locale"] as? String ?? "en-CA", continuous: body["continuous"] as? Bool ?? false)
         } else if cmd == "stop" {
-            dictation.finish()
+            dictation.stop()
         }
     }
 
@@ -401,7 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
-        dictation.finish()
+        dictation.stop()
         if let proc = serverProcess, proc.isRunning { proc.terminate() }
     }
 
@@ -414,6 +614,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         main.addItem(appItem)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About Cadence", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let updates = appMenu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        updates.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide Cadence", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(.separator())
@@ -450,6 +652,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         NSApp.windowsMenu = win
 
         NSApp.mainMenu = main
+    }
+
+    @objc func checkForUpdates() {
+        updater.check(userInitiated: true)
     }
 
     @objc func reloadWebView() {

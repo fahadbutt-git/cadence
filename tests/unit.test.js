@@ -14,6 +14,7 @@ delete process.env.GEMINI_API_KEY;
 
 const text = await import('../public/js/core/textUtils.js');
 const { ThemeManager } = await import('../public/js/core/themeManager.js');
+const voice = await import('../public/js/core/voiceCommands.js');
 const config = await import('../src/main/domains/config/configService.js');
 const repo = await import('../src/main/domains/projects/projectRepository.js');
 const forensics = await import('../src/main/domains/forensics/forensicsService.js');
@@ -79,10 +80,65 @@ test('ThemeManager resolves explicit and system preferences', () => {
   assert.ok(['light', 'dark'].includes(tm.getResolvedTheme('system')));
 });
 
+// ---------- conversation mode ----------
+
+test('parseCommand maps reading, navigation and decision phrases', () => {
+  const t = (x) => voice.parseCommand(x).type;
+  assert.equal(t('Continue.'), 'resume');
+  assert.equal(t('okay keep going'), 'resume');
+  assert.equal(t('pick it back up'), 'resume');
+  assert.equal(t('wait'), 'pause');
+  assert.equal(t('hold on'), 'pause');
+  assert.equal(t('go back'), 'prev');
+  assert.equal(t('next sentence'), 'next');
+  assert.equal(t('read that again'), 'repeat');
+  assert.equal(t('start over from the top'), 'restart');
+  assert.deepEqual(voice.parseCommand('go to paragraph three'), { type: 'gotoParagraph', n: 3 });
+  assert.deepEqual(voice.parseCommand('jump to paragraph 12'), { type: 'gotoParagraph', n: 12 });
+  assert.equal(t('next paragraph'), 'nextParagraph');
+  assert.equal(t('yes'), 'accept');
+  assert.equal(t('accept that'), 'accept');
+  assert.equal(t('never mind'), 'reject');
+  assert.equal(t('read it back to me'), 'readSuggestion');
+  assert.equal(t('undo that'), 'undo');
+  assert.equal(t('a bit faster'), 'faster');
+  assert.equal(t('slow down'), 'slower');
+  assert.equal(t('stop listening'), 'stopTalking');
+  assert.equal(t('anything flagged here?'), 'flags');
+  assert.equal(t('save a version'), 'snapshot');
+});
+
+test('parseCommand turns free speech into scoped edits and questions', () => {
+  const a = voice.parseCommand('tighten this sentence');
+  assert.deepEqual([a.type, a.action, a.scope], ['edit', 'tighten', 'sentence']);
+  const b = voice.parseCommand('Clean up this paragraph');
+  assert.deepEqual([b.type, b.action, b.scope], ['edit', 'humanize', 'paragraph']);
+  const c = voice.parseCommand('cut the ending');
+  assert.deepEqual([c.action, c.scope], ['cut-ending', 'paragraph']);
+  const d = voice.parseCommand('replace pivotal with important');
+  assert.deepEqual([d.type, d.action, d.instruction], ['edit', 'rewrite', 'replace pivotal with important']);
+  const e = voice.parseCommand('does this paragraph sound too formal?');
+  assert.equal(e.type, 'ask');
+  const f = voice.parseCommand('can you make the ending more concrete');
+  assert.equal(f.type, 'edit');
+});
+
+test('echo filter ignores the reading voice and catches the person talking over it', () => {
+  const reading = ['At the slit lamp, you look directly at cellular inflammation.'];
+  assert.equal(voice.isBargeIn('at the slit lamp you look', reading), false);
+  assert.equal(voice.isBargeIn('at the slit lamp wait', reading), true);
+  assert.equal(voice.isBargeIn('make this shorter', reading), true);
+  assert.equal(voice.isBargeIn('next', reading), true);
+  assert.equal(voice.isBargeIn('accept', reading), true);
+  assert.equal(voice.isBargeIn('inflammation', reading), false);
+  assert.equal(voice.cleanTranscript('directly at cellular make this shorter', reading), 'make this shorter');
+  assert.equal(voice.cleanTranscript('continue', reading), 'continue');
+});
+
 // ---------- config ----------
 
 test('config sanitizes patches and never exposes the API key', () => {
-  const saved = config.saveConfig({ voiceId: 'en-CA-ClaraNeural', rate: 9, bogus: 1, apiKey: 'AIza-secret-123456', pronunciations: [{ from: ' OCT ', to: 'O C T' }, { from: '' }] });
+  const saved = config.saveConfig({ voiceId: 'en-CA-ClaraNeural', rate: 9, bogus: 1, apiKey: 'test-key-1234567890', pronunciations: [{ from: ' OCT ', to: 'O C T' }, { from: '' }] });
   assert.equal(saved.voiceId, 'en-CA-ClaraNeural');
   assert.equal(saved.rate, 2);
   assert.equal(saved.bogus, undefined);
