@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { getVoiceProfileSummary } from '../config/configService.js';
+import { splitIntoSentences } from '../../../../public/js/core/textUtils.js';
 
 export const ACTIONS = {
   rewrite: 'Apply the instruction to the target text.',
@@ -29,6 +30,17 @@ const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Offline editor used when no API key is configured. Handles explicit, mechanical edits only. */
 export function localRuleBasedEdit(action = 'humanize', text = '', instruction = '') {
   const original = text || '';
+  if (action === 'ask') {
+    const words = original.split(/\s+/).filter(Boolean).length;
+    const sentences = (original.match(/[.!?]+(\s|$)/g) || []).length || 1;
+    const facts = `This passage has ${words} word${words === 1 ? '' : 's'} in ${sentences} sentence${sentences === 1 ? '' : 's'}, about ${Math.round(words / sentences)} words per sentence.`;
+    return {
+      proposedText: '',
+      rationale: `${facts} Answering questions needs a Gemini key in Settings.`,
+      spokenReply: `${facts} To answer questions like that I need a Gemini key, which you can add in Settings.`,
+      source: 'offline',
+    };
+  }
   let revised = original;
   const changes = [];
 
@@ -41,13 +53,13 @@ export function localRuleBasedEdit(action = 'humanize', text = '', instruction =
       const pat = new RegExp(`\\b${escapeRe(replace[1].trim())}\\b`, 'gi');
       if (pat.test(revised)) {
         revised = revised.replace(pat, replace[2].trim());
-        changes.push(`replaced "${replace[1].trim()}" with "${replace[2].trim()}"`);
+        changes.push(`replaced “${replace[1].trim()}” with “${replace[2].trim()}”`);
       }
     } else if (remove && !/sentence|ending|last/i.test(remove[1])) {
       const pat = new RegExp(`\\s*\\b${escapeRe(remove[1].trim())}\\b`, 'gi');
       if (pat.test(revised)) {
         revised = revised.replace(pat, '');
-        changes.push(`removed "${remove[1].trim()}"`);
+        changes.push(`removed “${remove[1].trim()}”`);
       }
     }
   }
@@ -73,17 +85,20 @@ export function localRuleBasedEdit(action = 'humanize', text = '', instruction =
   }
 
   if (action === 'tighten') {
-    const filler = /\b(very|really|quite|just|actually|basically|in order)\s+/gi;
-    if (filler.test(revised)) {
-      revised = revised.replace(filler, (m, w) => (w.toLowerCase() === 'in order' ? '' : ''));
-      changes.push('cut filler words');
-    }
+    const before = revised;
+    revised = revised
+      .replace(/\b([Ii])n order to\b/g, (m, i) => (i === 'I' ? 'To' : 'to'))
+      .replace(/\b(very|really|actually|basically)\s+(?=[a-z])/gi, '')
+      .replace(/\bI think (that )?/g, '');
+    if (revised !== before) changes.push('cut filler words');
   }
 
   if (action === 'cut-ending') {
     const sents = revised.match(/[^.!?]+[.!?]+["')\]]*(\s|$)|[^.!?]+$/g) || [revised];
     const last = sents[sents.length - 1] || '';
-    if (sents.length > 1 && /\b(taught me|reminded me|showed me|underscor|true meaning|ultimately|this experience)\b/i.test(last)) {
+    // An explicit "cut the last sentence" cuts it; otherwise only a moralising summary ending is cut.
+    const explicit = /\b(last|final) (sentence|line)\b|\b(cut|remove|drop|delete|get rid of|lose) the end(ing)?\b/i.test(instruction);
+    if (sents.length > 1 && (explicit || /\b(taught me|reminded me|showed me|underscor|true meaning|ultimately|this experience)\b/i.test(last))) {
       sents.pop();
       revised = sents.join('');
       changes.push('cut the closing summary sentence');
@@ -91,6 +106,9 @@ export function localRuleBasedEdit(action = 'humanize', text = '', instruction =
   }
 
   revised = revised.replace(/ {2,}/g, ' ').replace(/\s+([,.!?])/g, '$1').trim();
+  // Removing a word at the start of a sentence can leave it lower case.
+  revised = revised.replace(/([.!?]\s+)([a-z])/g, (m, p, c) => p + c.toUpperCase());
+  if (/^[A-Z]/.test(original.trim())) revised = revised.charAt(0).toUpperCase() + revised.slice(1);
   const changed = revised !== original.trim();
   const unique = [...new Set(changes)];
   const summary = unique.slice(0, 3).join(', ');
@@ -99,7 +117,7 @@ export function localRuleBasedEdit(action = 'humanize', text = '', instruction =
     proposedText: changed ? revised : '',
     rationale: changed
       ? `Offline edit: ${summary}.`
-      : 'No mechanical change found. Add a Gemini API key in Settings for full rewrites, or give an exact instruction such as "replace utilized with used".',
+      : 'No mechanical change found. Add a Gemini API key in Settings for full rewrites, or give an exact instruction such as “replace utilized with used”.',
     spokenReply: changed
       ? `I ${summary}. Have a look and accept it if it reads right.`
       : 'I did not find anything to change. Try an exact instruction, like replace one word with another.',
@@ -208,7 +226,8 @@ export function localReview(paragraphs = []) {
   const bodies = paragraphs.map((p, i) => ({ ...p, i })).filter((p) => p.type !== 'heading' && (p.text || '').trim());
   for (const p of bodies) {
     const text = p.text;
-    const sents = text.match(/[^.!?]+[.!?]+["')\]]*/g) || [text];
+    const sents = splitIntoSentences(text);
+    if (!sents.length) sents.push(text);
     const notes = [];
     // A list: four or more comma-separated chunks that are mostly short.
     const listy = sents.find((s) => {

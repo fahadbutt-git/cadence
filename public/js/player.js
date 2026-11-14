@@ -157,9 +157,11 @@ export class Player extends EventTarget {
     const token = ++this.token;
     this.dispatchEvent(new CustomEvent('sentence', { detail: item }));
     if (this.offline) return this.speakWithSystem(item.text, token);
-    this.prefetch();
     try {
-      const url = await this.fetchAudio(item.text, this.getVoice());
+      // Ask for the current sentence first, then the next ones.
+      const pending = this.fetchAudio(item.text, this.getVoice());
+      this.prefetch();
+      const url = await pending;
       if (token !== this.token || !this.playing) return;
       this.audio.src = url;
       this.audio.playbackRate = this.getRate();

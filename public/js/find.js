@@ -35,13 +35,21 @@ export class FindBar {
     this.els.bar.hidden = false;
     const sel = this.editor.getSelectionInfo();
     if (sel && !sel.multi && sel.text.length < 80) this.els.input.value = sel.text;
-    (withReplace && this.els.input.value ? this.els.replace : this.els.input).focus();
-    this.els.input.select();
+    if (withReplace && this.els.input.value) {
+      this.els.replace.focus();
+      this.els.replace.select();
+    } else {
+      this.els.input.focus();
+      this.els.input.select();
+    }
     this.search(true);
   }
 
   close() {
+    const wasOpen = !this.els.bar.hidden;
+    const focusInside = this.els.bar.contains(document.activeElement);
     this.els.bar.hidden = true;
+    if (wasOpen && focusInside) this.els.onClose?.();
     this.matches = [];
     this.editor.setLayer('find', []);
     this.editor.setLayer('find-current', []);

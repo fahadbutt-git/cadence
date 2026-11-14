@@ -1,5 +1,5 @@
 import { ThemeManager } from './js/core/themeManager.js';
-import { buildSentenceReadQueue, computeBurstinessStats, computeWordDiffHtml, escapeHtml, findFlags } from './js/core/textUtils.js';
+import { buildSentenceReadQueue, computeBurstinessStats, computeWordDiffHtml, escapeHtml, findFlags, trackChanges } from './js/core/textUtils.js';
 import { Editor, rangeFromOffsets } from './js/editor.js';
 import { Player } from './js/player.js';
 import { Dictation } from './js/dictation.js';
@@ -54,7 +54,13 @@ const comments = new Comments(editor, { list: $('#commentList'), empty: $('#comm
 const language = new LanguageChecker(editor, $('#issuePop'));
 const tracker = new Tracker(editor, { list: $('#changeList'), empty: $('#changesEmpty'), count: $('#changeCount'), markup: $('#markup') });
 const wordChoice = new WordChoice(editor, $('#choicePop'), api);
+// Undo and redo also restore what tracked changes compare against, so undoing an accept brings the change back.
+editor.extraState = {
+  get: () => (tracker.baseline ? tracker.baseline.map((p) => ({ ...p })) : null),
+  set: (b) => { tracker.baseline = b ? b.map((p) => ({ ...p })) : tracker.on ? tracker.baseline : null; tracker.schedule(0); scheduleSave(); },
+};
 const finder = new FindBar(editor, {
+  onClose: () => returnFocus(),
   bar: $('#findBar'), input: $('#findInput'), replace: $('#replaceInput'), count: $('#findCount'),
   prev: $('#findPrev'), next: $('#findNext'), one: $('#replaceOne'), all: $('#replaceAll'), matchCase: $('#findCase'), close: $('#findClose'),
 });
@@ -63,17 +69,35 @@ const finder = new FindBar(editor, {
 
 // Messages show in the top bar beside the save state, not over the page.
 let statusTimer = null;
-function toast(message, kind = '') {
+function toast(message, kind = '', { action = null } = {}) {
   if (!message) return;
-  const el = $('#status');
+  // In the library there is no status bar; use the library's own line.
+  const inEditor = !$('#editorView').hidden;
+  const el = inEditor ? $('#status') : $('#libraryStatus');
   el.textContent = message;
   el.title = message;
   el.className = `status small ${kind}`;
+  if (action) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn subtle';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { action.run(); hideStatus(); });
+    el.append(' ', b);
+  }
   el.hidden = false;
-  $('#saveState').hidden = true;
-  $('#docStats').hidden = true;
+  if (inEditor) { $('#saveState').hidden = true; $('#docStats').hidden = true; }
   clearTimeout(statusTimer);
-  statusTimer = setTimeout(() => { el.hidden = true; $('#saveState').hidden = false; $('#docStats').hidden = false; }, kind === 'error' ? 8000 : 4500);
+  // Longer messages and errors stay up longer; hovering keeps them.
+  const ms = Math.max(kind === 'error' ? 9000 : 4500, message.length * 70) + (action ? 4000 : 0);
+  statusTimer = setTimeout(hideStatus, ms);
+  el.onmouseenter = () => clearTimeout(statusTimer);
+  el.onmouseleave = () => { statusTimer = setTimeout(hideStatus, 2500); };
+}
+function hideStatus() {
+  for (const el of [$('#status'), $('#libraryStatus')]) el.hidden = true;
+  $('#saveState').hidden = false;
+  $('#docStats').hidden = false;
 }
 
 // ---------- Config ----------
@@ -112,15 +136,32 @@ function saveConfig(patch) {
 
 // ---------- Views ----------
 
-function showLibrary() {
-  if (state.doc) flushSave();
+/** Wait until the open document has no unsaved edits, including edits typed while a save was in flight. */
+async function settleSaves() {
+  for (let i = 0; i < 10 && state.doc && (state.dirty || state.saving); i++) {
+    clearTimeout(saveTimer);
+    const ok = await flushSave();
+    if (!ok && !state.saving && state.dirty) return false;
+  }
+  return !(state.doc && state.dirty);
+}
+
+async function showLibrary() {
+  // Finish saving first. If the save cannot get through, stay in the document so nothing is lost.
+  if (!(await settleSaves())) {
+    toast('Your latest changes are not saved yet. Cadence will keep trying. Stay here or copy your text before leaving.', 'error');
+    return;
+  }
   player.stop();
   stopTalk();
   $('#editorView').hidden = true;
   $('#libraryView').hidden = false;
   document.title = 'Cadence';
+  const lastId = state.doc?.id;
   state.doc = null;
-  loadLibrary();
+  await loadLibrary();
+  // Return focus to the document you came from.
+  (lastId && $(`.doc-row[data-id="${CSS.escape(lastId)}"]`))?.focus();
 }
 
 function showEditor() {
@@ -161,18 +202,19 @@ function renderLibrary() {
   }
 
   $('#libraryEmpty').hidden = state.docs.length > 0;
+  $('#libraryNoMatch').hidden = !(state.docs.length && !docs.length);
   $('#docList').innerHTML = docs
     .map(
       (d) => `
-    <li class="doc-row" data-id="${d.id}" tabindex="0">
+    <li class="doc-row" data-id="${escapeHtml(d.id)}" tabindex="0" role="button" aria-label="Open ${escapeHtml(d.title)}">
       <div>
         <h3>${escapeHtml(d.title)}</h3>
         <p class="excerpt">${escapeHtml(d.excerpt || 'Empty document')}</p>
       </div>
       <div class="meta">${d.wordCount.toLocaleString('en-CA')} words<br>${relativeTime(d.updatedAt)}</div>
       <div class="row-actions">
-        <button class="icon-btn" data-row="play" type="button" aria-label="Listen from bookmark" title="Listen from bookmark"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.2v11.6L16 10Z" fill="currentColor"/></svg></button>
-        <button class="icon-btn" data-row="delete" type="button" aria-label="Delete" title="Delete"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4h4v2M6 6l.7 10h6.6L14 6"/></svg></button>
+        <button class="icon-btn" data-row="play" type="button" aria-label="Listen to ${escapeHtml(d.title)} from the bookmark" title="Listen from bookmark"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M6.5 4.2v11.6L16 10Z" fill="currentColor"/></svg></button>
+        <button class="icon-btn" data-row="delete" type="button" aria-label="Delete ${escapeHtml(d.title)}" title="Delete"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 6h12M8 6V4h4v2M6 6l.7 10h6.6L14 6"/></svg></button>
       </div>
     </li>`
     )
@@ -185,7 +227,7 @@ $('#docList').addEventListener('click', async (e) => {
   const act = e.target.closest('[data-row]')?.dataset.row;
   const doc = state.docs.find((d) => d.id === row.dataset.id);
   if (act === 'delete') {
-    if (await confirmDialog(`Delete "${doc.title}"? Saved versions are kept on disk.`)) {
+    if (await confirmDialog(`Delete “${doc.title}”? Saved versions are kept on disk.`)) {
       await api.del(`/api/documents/${doc.id}`);
       toast('Document deleted');
       loadLibrary();
@@ -195,13 +237,18 @@ $('#docList').addEventListener('click', async (e) => {
   openDocument(row.dataset.id, { atBookmark: true, play: act === 'play' });
 });
 $('#docList').addEventListener('keydown', (e) => {
+  if (e.key === ' ' && e.target.classList?.contains('doc-row')) { e.preventDefault(); e.target.click(); return; }
   if (e.key === 'Enter' && e.target.classList.contains('doc-row')) openDocument(e.target.dataset.id, { atBookmark: true });
 });
 $('#librarySearch').addEventListener('input', renderLibrary);
 
-function confirmDialog(text) {
+function confirmDialog(text, okLabel = 'Delete', cancelLabel = 'Cancel') {
   const dlg = $('#confirmDialog');
   $('#confirmText').textContent = text;
+  $('#confirmOk').textContent = okLabel;
+  $('#confirmOk').classList.toggle('danger', /delete|discard|reject/i.test(okLabel));
+  $('#confirmOk').classList.toggle('primary', !/delete|discard|reject/i.test(okLabel));
+  $('#confirmCancel').textContent = cancelLabel;
   dlg.showModal();
   return new Promise((resolve) => dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok'), { once: true }));
 }
@@ -216,15 +263,16 @@ async function newDocument() {
 async function importFile(file) {
   if (!file) return;
   if (!/\.(docx|md|markdown|txt)$/i.test(file.name)) return toast('Use a .docx, .md or .txt file', 'error');
+  if (file.size > 25 * 1024 * 1024) return toast('That file is over 25 MB. Split it into smaller files and import them one at a time.', 'error');
   const fd = new FormData();
   fd.append('file', file);
   toast(`Importing ${file.name}`);
   try {
     const res = await fetch('/api/import', { method: 'POST', body: fd });
-    const doc = await res.json();
+    const doc = await res.json().catch(() => ({ error: 'The import failed. Try again.' }));
     if (!res.ok) throw new Error(doc.error || 'Import failed');
     await openDocument(doc.id);
-    toast(`Imported ${file.name}`);
+    toast(doc.notices?.length ? `Imported ${file.name}. ${doc.notices.join(' ')}` : `Imported ${file.name}`, doc.notices?.length ? 'note' : '');
   } catch (e) {
     toast(e.message, 'error');
   }
@@ -254,6 +302,11 @@ window.addEventListener('drop', (e) => {
 // ---------- Open and save ----------
 
 async function openDocument(id, { atBookmark = false, play = false, focusTitle = false } = {}) {
+  // Save the document that is open now before switching.
+  if (state.doc && state.doc.id !== id && !(await settleSaves())) {
+    toast('Your latest changes are not saved yet. Cadence will keep trying. Stay here or copy your text before switching.', 'error');
+    return;
+  }
   try {
     player.stop();
     player.queue = [];
@@ -266,9 +319,12 @@ async function openDocument(id, { atBookmark = false, play = false, focusTitle =
     document.title = `${doc.title} - Cadence`;
     $('#styleSelect').value = doc.style || 'narrative';
     $('#paper').classList.toggle('academic', doc.style === 'academic');
+    $('#markup').classList.toggle('academic', doc.style === 'academic');
+    editor.style = doc.style || 'narrative';
     $('#wordTarget').value = doc.wordTarget || '';
     editor.load(doc.paragraphs);
     comments.load(doc.comments || []);
+    language.loadIgnored(doc.ignored || []);
     tracker.load(doc.tracking);
     setTrackUi();
     wordChoice.hide();
@@ -299,36 +355,117 @@ async function openDocument(id, { atBookmark = false, play = false, focusTitle =
 
 let saveTimer = null;
 function scheduleSave() {
+  if (!state.doc) return;
   state.dirty = true;
   setSaveState('Editing');
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 700);
 }
 
+/**
+ * Save the open document. Each save says which version it was based on, so a save from an out-of-date window
+ * is refused instead of overwriting newer work. The reply is only applied to the document it was sent for.
+ * Returns true when everything is saved.
+ */
 async function flushSave(extra = {}) {
   clearTimeout(saveTimer);
-  if (!state.doc || (!state.dirty && !extra.createSnapshot)) return;
+  if (!state.doc || (!state.dirty && !extra.createSnapshot)) return !state.dirty;
+  if (state.saving) {
+    // One save at a time; run again when the current one finishes.
+    state.saveAgain = { ...(state.saveAgain || {}), ...extra };
+    return state.savingPromise;
+  }
+  const doc = state.doc;
   const payload = {
-    id: state.doc.id,
+    id: doc.id,
+    baseVersion: doc.version ?? null,
     title: $('#docTitle').value.trim() || 'Untitled',
     style: $('#styleSelect').value,
-    wordTarget: Number($('#wordTarget').value) || null,
+    wordTarget: Math.max(0, Number($('#wordTarget').value) || 0) || null,
     paragraphs: editor.getParagraphs(),
     comments: comments.all(),
     tracking: tracker.toJSON(),
+    ignored: language.ignoredList(),
     ...extra,
   };
   state.dirty = false;
+  state.saving = true;
   setSaveState('Saving');
-  try {
-    const saved = await api.post('/api/documents', payload);
-    state.doc = { ...state.doc, ...saved, bookmark: state.doc.bookmark };
-    setSaveState('Saved');
-    if (extra.createSnapshot) loadRevisions();
-  } catch (e) {
-    state.dirty = true;
-    setSaveState('Not saved. Retrying');
-    saveTimer = setTimeout(flushSave, 3000);
+  state.savingPromise = (async () => {
+    try {
+      const res = await fetch('/api/documents', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409 || res.status === 410) return conflict(doc, res.status, body), false;
+      if (!res.ok) throw new Error(body.error || `Save failed (${res.status})`);
+      doc.version = body.version;
+      if (state.doc === doc) {
+        state.doc = { ...doc, ...body, bookmark: doc.bookmark };
+        setSaveState(state.dirty ? 'Editing' : 'Saved');
+      }
+      if (extra.createSnapshot) loadRevisions();
+      return true;
+    } catch (e) {
+      if (state.doc === doc) {
+        state.dirty = true;
+        setSaveState('Not saved. Retrying');
+        saveTimer = setTimeout(flushSave, 3000);
+      }
+      return false;
+    } finally {
+      state.saving = false;
+      if (state.saveAgain && state.doc === doc) {
+        const again = state.saveAgain;
+        state.saveAgain = null;
+        setTimeout(() => flushSave(again), 0);
+      } else {
+        state.saveAgain = null;
+      }
+    }
+  })();
+  return state.savingPromise;
+}
+
+/** Another window saved or deleted this document. Keep this window's text and let the person choose. */
+async function conflict(doc, status, body) {
+  if (state.doc !== doc || state.inConflict) return;
+  state.inConflict = true;
+  try { await resolveConflict(doc, status, body); } finally { state.inConflict = false; }
+}
+async function resolveConflict(doc, status, body) {
+  state.saveAgain = null;
+  state.dirty = true;
+  setSaveState('Not saved');
+  const deleted = status === 410;
+  const keepMine = await confirmDialog(
+    deleted
+      ? 'This document was deleted in another window. Save your text here as a new document?'
+      : 'This document was changed in another window. Keep your version here (the other changes are saved as a version you can restore), or load the other version?',
+    deleted ? 'Save as new' : 'Keep mine',
+    deleted ? 'Discard' : 'Load the other version'
+  );
+  if (state.doc !== doc) return;
+  if (deleted) {
+    if (keepMine) {
+      state.doc = { ...doc, id: undefined, version: null };
+      const res = await api.post('/api/documents', { title: $('#docTitle').value, paragraphs: editor.getParagraphs(), comments: comments.all(), tracking: tracker.toJSON() });
+      state.doc = res;
+      state.dirty = false;
+      setSaveState('Saved');
+    } else {
+      state.dirty = false;
+      showLibrary();
+    }
+    return;
+  }
+  if (keepMine) {
+    // Keep the other window's text as a version, then save this one on top.
+    await api.post(`/api/documents/${doc.id}/snapshot`, { reason: 'Changes from another window' }).catch(() => {});
+    doc.version = body.current?.version;
+    state.doc = { ...state.doc, version: body.current?.version };
+    flushSave();
+  } else {
+    state.dirty = false;
+    openDocument(doc.id);
   }
 }
 
@@ -348,7 +485,7 @@ function saveBookmark(item, immediate = false) {
 
 window.addEventListener('beforeunload', () => {
   if (state.doc && state.dirty) {
-    navigator.sendBeacon?.('/api/documents', new Blob([JSON.stringify({ id: state.doc.id, title: $('#docTitle').value, paragraphs: editor.getParagraphs() })], { type: 'application/json' }));
+    navigator.sendBeacon?.('/api/documents', new Blob([JSON.stringify({ id: state.doc.id, baseVersion: state.doc.version ?? null, title: $('#docTitle').value, paragraphs: editor.getParagraphs(), comments: comments.all(), tracking: tracker.toJSON() })], { type: 'application/json' }));
   }
 });
 document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
@@ -360,6 +497,10 @@ $('#docTitle').addEventListener('input', () => {
 $('#docTitle').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); editor.setCaret(0, 0); } });
 $('#styleSelect').addEventListener('change', () => {
   $('#paper').classList.toggle('academic', $('#styleSelect').value === 'academic');
+  $('#markup').classList.toggle('academic', $('#styleSelect').value === 'academic');
+  editor.style = $('#styleSelect').value;
+  editor.refreshFlags();
+  refreshDerived();
   scheduleSave();
 });
 $('#wordTarget').addEventListener('input', () => { scheduleSave(); refreshDerived(); });
@@ -368,13 +509,17 @@ $('#wordTarget').addEventListener('input', () => { scheduleSave(); refreshDerive
 
 let derivedTimer = null;
 comments.addEventListener('change', () => scheduleSave());
+comments.addEventListener('removed', () => toast('Comment deleted.', '', { action: { label: 'Undo', run: () => comments.undoRemove() } }));
 editor.addEventListener('change', () => {
   scheduleSave();
   language.schedule();
   tracker.schedule();
+  comments.repair(new Set(tracker.baseline ? tracker.baseline.map((p) => p.id) : []));
   comments.render();
   if (player.playing) {
+    state.pauseFromEdit = true;
     player.pause();
+    state.pauseFromEdit = false;
     toast('Paused while you edit. Press Option+Space to continue from the cursor.');
   }
   clearTimeout(derivedTimer);
@@ -384,8 +529,10 @@ editor.addEventListener('change', () => {
 function refreshDerived() {
   const paras = editor.paragraphs;
   const stats = computeBurstinessStats(paras);
-  const target = Number($('#wordTarget').value) || 0;
-  $('#docStats').textContent = `${stats.wordCount.toLocaleString('en-CA')}${target ? ` of ${target.toLocaleString('en-CA')}` : ''} words, ${stats.listenTimeFormatted} to listen`;
+  const target = Math.max(0, Number($('#wordTarget').value) || 0);
+  const over = target && stats.wordCount > target ? stats.wordCount - target : 0;
+  $('#docStats').textContent = `${stats.wordCount.toLocaleString('en-CA')}${target ? ` of ${target.toLocaleString('en-CA')}` : ''} words${over ? `, ${over.toLocaleString('en-CA')} over` : ''}, ${stats.listenTimeFormatted} to listen`;
+  $('#docStats').classList.toggle('over', Boolean(over));
 
   const flags = editor.collectFlags();
   updateCheckBadge(flags);
@@ -424,6 +571,22 @@ function refreshDerived() {
 
 // Issues with the same word and message are grouped, so a name flagged five times is one row.
 let issueGroups = [];
+/** Letters that differ between two words (Levenshtein distance). */
+function editDistance(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+// A spelling fix is only offered for every occurrence when it is a near miss (one or two letters), so a correct
+// medical term is never swapped everywhere for a different word.
+const safeToChangeAll = (g) => {
+  if (!['Spelling', 'Typo'].includes(g.kind)) return true;
+  const fix = (g.suggestions[0] ?? '').trim();
+  // One letter different, same first letter, and no word split ("fundus" must not become "fund us").
+  return Boolean(fix) && !/\s/.test(fix) && fix[0].toLowerCase() === g.text.trim()[0].toLowerCase() && editDistance(g.text.trim(), fix) <= 1;
+};
 function renderIssues() {
   const list = language.enabled ? language.issues : [];
   const groups = new Map();
@@ -448,7 +611,7 @@ function renderIssues() {
       return `<li class="issue-row" data-g="${n}" tabindex="0">
         <div class="issue-top"><b>${escapeHtml(g.text.length > 40 ? g.text.slice(0, 40) + '…' : g.text)}</b>${many ? `<span class="times">${g.items.length} times</span>` : ''}<span class="where">${where}</span></div>
         <div class="issue-msg">${escapeHtml(g.message.replace(/`/g, ''))}</div>
-        <div class="issue-actions">${fix !== undefined ? `<button class="btn" data-gact="fix" type="button">${many && fix !== '' ? `Change all to “${escapeHtml(fix)}”` : many ? 'Remove all' : fixLabel}</button>` : ''}${spelling ? '<button class="btn subtle" data-gact="dict" type="button">Add to dictionary</button>' : ''}<button class="btn subtle" data-gact="ignore" type="button">Ignore</button></div>
+        <div class="issue-actions">${fix !== undefined ? `<button class="btn" data-gact="${many && !safeToChangeAll(g) ? 'fixone' : 'fix'}" type="button">${many && safeToChangeAll(g) ? (fix !== '' ? `Change all to “${escapeHtml(fix)}”` : 'Remove all') : fixLabel}</button>` : ''}${spelling ? '<button class="btn subtle" data-gact="dict" type="button">Add to dictionary</button>' : ''}<button class="btn subtle" data-gact="ignore" type="button">Ignore</button></div>
       </li>`;
     })
     .join('');
@@ -460,7 +623,8 @@ $('#issueList').addEventListener('click', (e) => {
   const g = issueGroups[Number(row.dataset.g)];
   if (!g) return;
   const act = e.target.closest('[data-gact]')?.dataset.gact;
-  if (act === 'fix') { const n = language.applyAll(g.items, g.suggestions[0]); if (n > 1) toast(`Changed ${n} places. Cmd+Z to undo.`); return; }
+  if (act === 'fix') { const n = language.applyAll(g.items, g.suggestions[0]); if (n > 1) toast(`Changed ${n} places. Cmd+Z to undo.`); returnFocus(); return; }
+  if (act === 'fixone') { quietSelection = true; revealInDocument(); language.apply(g.items[0], g.suggestions[0]); return; }
   if (act === 'ignore') return language.ignoreAll(g.items);
   if (act === 'dict') return language.dispatchEvent(new CustomEvent('add-word', { detail: g.text }));
   // Clicking the row steps through each place it occurs.
@@ -481,6 +645,7 @@ function updateCheckBadge(flags = editor.collectFlags()) {
   $('#flagCount').hidden = n === 0;
   $('#flagCount').textContent = n;
 }
+language.addEventListener('ignore', () => scheduleSave());
 language.addEventListener('change', () => {
   renderIssues();
   updateCheckBadge();
@@ -490,7 +655,7 @@ language.addEventListener('add-word', async (e) => {
   try {
     state.config = await api.post('/api/dictionary', { word: e.detail });
     language.clearCache();
-    toast(`Added "${e.detail}" to your dictionary`);
+    toast(`Added “${e.detail}” to your dictionary`);
   } catch (err) {
     toast(err.message, 'error');
   }
@@ -530,7 +695,7 @@ function renderStrip() {
   stripItems = buildSentenceReadQueue(editor.paragraphs, 0, 0);
   const flagSet = new Set();
   editor.paragraphs.forEach((p, pi) => {
-    for (const f of findFlags(p.text, editor.groups)) if (f.group === 'house' || f.kind === 'veryhard') flagSet.add(`${pi}:${f.start}`);
+    for (const f of findFlags(p.text, editor.groups, { style: editor.style })) if (f.group === 'house' || f.kind === 'veryhard') flagSet.add(`${pi}:${f.start}`);
   });
   const now = player.current;
   const html = stripItems
@@ -548,7 +713,21 @@ function renderStrip() {
     })
     .join('');
   $('#strip').innerHTML = html;
+  const nowIdx = now ? stripItems.findIndex((x) => x.paraIndex === now.paraIndex && x.sentIndex === now.sentIndex) : -1;
+  const strip = $('#strip');
+  strip.setAttribute('aria-valuemin', '1');
+  strip.setAttribute('aria-valuemax', String(Math.max(1, stripItems.length)));
+  strip.setAttribute('aria-valuenow', String(Math.max(1, nowIdx + 1)));
+  strip.setAttribute('aria-valuetext', stripItems.length ? `Sentence ${Math.max(1, nowIdx + 1)} of ${stripItems.length}` : 'No sentences');
 }
+// Arrow keys on the strip move reading by a sentence, Home and End go to the start or end.
+$('#strip').addEventListener('keydown', (e) => {
+  if (!stripItems.length || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  e.preventDefault();
+  const cur = player.current ? stripItems.findIndex((x) => x.paraIndex === player.current.paraIndex && x.sentIndex === player.current.sentIndex) : -1;
+  const i = e.key === 'Home' ? 0 : e.key === 'End' ? stripItems.length - 1 : Math.max(0, Math.min(stripItems.length - 1, cur + (e.key === 'ArrowRight' ? 1 : -1)));
+  startReading({ paraIndex: stripItems[i].paraIndex, sentIndex: stripItems[i].sentIndex });
+});
 
 $('#strip').addEventListener('click', (e) => {
   const t = e.target.closest('.tick');
@@ -584,6 +763,10 @@ player.addEventListener('sentence', (e) => {
   });
   saveBookmark(item);
   talk.lastReadAt = Date.now();
+  // Everything read since the person last spoke: the Mac keeps one recognition request open, so a
+  // partial transcript can contain several sentences of Cadence's own voice.
+  talk.readLog.push(item.text);
+  if (talk.readLog.length > 40) talk.readLog.shift();
   state.pausePoint = { paraIndex: item.paraIndex, sentIndex: item.sentIndex };
   if (talk.on) caption('cadence', `Reading paragraph ${item.paraIndex + 1}`);
 });
@@ -599,13 +782,14 @@ player.addEventListener('state', (e) => {
       saveBookmark(item, true);
       // Leave the caret where reading stopped so play resumes there.
       editor.clearReadingHighlight();
-      if (!state.pendingAi) editor.setCaret(item.paraIndex, item.start, { focus: document.activeElement === document.body || editor.root.contains(document.activeElement), scroll: false });
+      if (!state.pendingAi && !state.pauseFromEdit) editor.setCaret(item.paraIndex, item.start, { focus: document.activeElement === document.body || editor.root.contains(document.activeElement), scroll: false });
     }
   }
 });
 player.addEventListener('finished', () => {
   editor.clearReadingHighlight();
   $('#positionLabel').textContent = 'Finished. Press play to start again from the cursor';
+  if (talk.on) say('That is the end of the document.');
 });
 player.addEventListener('notice', (e) => toast(e.detail));
 
@@ -665,8 +849,10 @@ async function requestEdit(action, instruction = '', { target = currentTarget(),
     note.textContent = res.source === 'offline' ? 'Offline edit. Add a Gemini API key in Settings for full rewrites.' : '';
     note.hidden = !note.textContent;
     if (res.proposedText) {
+      const id = `s-${Date.now()}`;
+      if (conversational) talk.lastSuggestionId = id;
       editor.addSuggestion({
-        id: `s-${Date.now()}`,
+        id,
         paraId: para.id,
         start: target.start,
         end: target.end,
@@ -812,29 +998,33 @@ $('#askForm').addEventListener('submit', (e) => {
 // Talk keeps the microphone open. Speaking while Cadence reads pauses it (barge-in),
 // the utterance is parsed into a command or an edit, and "continue" resumes from the paused sentence.
 
-const talk = { on: false, lastSaid: '', lastReadAt: 0, bargeCtx: null };
+const talk = { on: false, stopping: false, lastSaid: '', lastReadAt: 0, bargeCtx: null, readLog: [], lastSuggestionId: null };
 
 function caption(who, text) {
   const el = $('#caption');
-  if (!talk.on && who !== 'cadence') { el.hidden = true; return; }
+  if (!talk.on) { el.hidden = true; $('#positionLabel').hidden = false; return; }
   el.hidden = !text;
   $('#positionLabel').hidden = !el.hidden;
   el.dataset.who = who;
   $('#captionWho').textContent = who === 'you' ? 'You' : who === 'cadence' ? 'Cadence' : '';
   $('#captionText').textContent = text;
+  el.title = text; // the full text when it is cut to two lines
 }
 
-function say(text) {
+function say(text, { thenResume = false } = {}) {
   if (!text) return;
   talk.lastSaid = text;
   caption('cadence', text);
   player.say(text);
+  if (thenResume) {
+    const done = () => { player.audio.removeEventListener('ended', done); if (talk.on) resumeFromPause(); };
+    player.audio.addEventListener('ended', done);
+  }
 }
 
 // What Cadence is saying right now, which the microphone may also be hearing.
 function echoContext() {
-  const ctx = [];
-  if (!player.playing && !player.audio.paused) ctx.push(talk.lastSaid); // a spoken reply is playing
+  const ctx = [...talk.readLog];
   const item = player.current;
   if (item) {
     ctx.push(item.text);
@@ -865,6 +1055,8 @@ function moveSentence(delta) {
 function goToParagraph(index) {
   const n = editor.paragraphs.length;
   const i = index < 0 ? n - 1 : Math.max(0, Math.min(n - 1, index));
+  if (talk.on && index >= n) return say(`There ${n === 1 ? 'is only one paragraph' : `are only ${n} paragraphs`}. Say last paragraph to go to the end.`);
+  if (talk.on && index < 0 && n && i === editor.paragraphs.length - 1 && state.pausePoint?.paraIndex === i && !player.playing && index !== -1) return say('That is the first paragraph.');
   startReading({ paraIndex: i, sentIndex: 0 });
 }
 
@@ -895,10 +1087,13 @@ function voiceTarget(scope) {
   return para ? { index, start: 0, end: para.text.length, text: para.text, kind: 'paragraph' } : null;
 }
 
+// The suggestion the last spoken reply was about, then the one at the pause point.
 function suggestionHere() {
+  const last = editor.suggestions.find((x) => x.id === talk.lastSuggestionId);
+  if (last) return last;
   const p = state.pausePoint;
   const idx = p ? p.paraIndex : editor.getCaret()?.index ?? editor.currentIndex;
-  return editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || editor.suggestions.at(-1);
+  return editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || (editor.suggestions.length === 1 ? editor.suggestions[0] : null);
 }
 
 function describeChange(h) {
@@ -913,11 +1108,13 @@ function describeChange(h) {
 async function runCommand(cmd, heard) {
   switch (cmd.type) {
     case 'none': return;
+    case 'unknown': return say(`I did not catch that. I heard ${cmd.heard.replace(/[.,!?]+$/, '')}. Say help to hear what I can do.`);
+    case 'paragraphStart': return goToParagraph(state.pausePoint?.paraIndex ?? editor.currentIndex);
     case 'pause': player.pause(); return say('Paused.');
     case 'resume': caption('cadence', 'Reading'); return resumeFromPause();
     case 'restart': return goToParagraph(0);
-    case 'next': return moveSentence(1);
-    case 'prev': return moveSentence(-1);
+    case 'next': return moveSentence(cmd.count || 1);
+    case 'prev': return moveSentence(-(cmd.count || 1));
     case 'repeat': return moveSentence(0);
     case 'nextParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) + 1);
     case 'prevParagraph': return goToParagraph((state.pausePoint?.paraIndex ?? editor.currentIndex) - 1);
@@ -936,9 +1133,10 @@ async function runCommand(cmd, heard) {
       return say(describeChange(h));
     }
     case 'acceptAllChanges': { const n = tracker.acceptAll(); return say(n ? `Accepted ${n} change${n === 1 ? '' : 's'}.` : 'There are no changes to accept.'); }
-    case 'rejectAllChanges': { const n = tracker.rejectAll(); return say(n ? `Rejected ${n} change${n === 1 ? '' : 's'}. Say undo to bring them back.` : 'There are no changes to reject.'); }
+    case 'rejectAllChanges': { const n = tracker.rejectAll(); return say(n ? `Rejected ${n} change${n === 1 ? '' : 's'}. Say undo to bring ${n === 1 ? 'it' : 'them'} back.` : 'There are no changes to reject.'); }
     case 'accept': {
       const s = suggestionHere();
+      if (!s && !tracker.activeId && tracker.hunks.length) tracker.step(1);
       if (!s && tracker.activeId) { tracker.accept(tracker.activeId); return say(tracker.activeId ? `Accepted. Next: ${describeChange(tracker.find(tracker.activeId))}` : 'Accepted. That was the last change.'); }
       if (!s) return say('There is no suggestion to accept.');
       handleSuggestion(s.id, 'accept');
@@ -946,6 +1144,7 @@ async function runCommand(cmd, heard) {
     }
     case 'reject': {
       const s = suggestionHere();
+      if (!s && !tracker.activeId && tracker.hunks.length) tracker.step(1);
       if (!s && tracker.activeId) { tracker.reject(tracker.activeId); return say(tracker.activeId ? `Rejected. Next: ${describeChange(tracker.find(tracker.activeId))}` : 'Rejected. That was the last change.'); }
       if (!s) return say('Nothing to reject.');
       handleSuggestion(s.id, 'reject');
@@ -957,8 +1156,11 @@ async function runCommand(cmd, heard) {
     }
     case 'undo': return editor.undo() ? say('Undone.') : say('Nothing to undo.');
     case 'redo': return editor.redo() ? say('Redone.') : say('Nothing to redo.');
-    case 'faster': return say(`Speed ${stepRate(1)}.`);
-    case 'slower': return say(`Speed ${stepRate(-1)}.`);
+    case 'faster':
+    case 'slower': {
+      const wasReading = Boolean(player.playing || state.pausePoint) && Date.now() - talk.lastReadAt < 5000;
+      return say(`Speed ${stepRate(cmd.type === 'faster' ? 1 : -1)}.`, { thenResume: wasReading });
+    }
     case 'flags': {
       const idx = state.pausePoint?.paraIndex ?? editor.currentIndex;
       const f = editor.collectFlags().filter((x) => x.index === idx);
@@ -985,8 +1187,8 @@ async function runCommand(cmd, heard) {
       let target = voiceTarget(cmd.scope);
       if (!target) return say('Put the cursor in a paragraph first.');
       // "Replace X with Y": widen to the paragraph, then the document, when X is not in the target.
-      const named = cmd.type === 'edit' && cmd.instruction.match(/\b(?:replace|change|swap|delete|remove|cut)\s+["“']?(.+?)["”']?(?:\s+(?:with|to|for)\s|$)/i);
-      if (named && !target.text.toLowerCase().includes(named[1].toLowerCase())) {
+      const named = cmd.type === 'edit' && cmd.action === 'rewrite' && cmd.instruction.match(/\b(?:replace|change|swap|delete|remove|cut)\s+["“']?(.+?)["”']?(?:\s+(?:with|to|for)\s|$)/i);
+      if (named && !/^(this|that|it|the (last|first) (sentence|line|word)|the ending|the end)$/i.test(named[1].trim()) && !target.text.toLowerCase().includes(named[1].toLowerCase())) {
         const want = named[1].toLowerCase();
         const order = [target.index, ...editor.paragraphs.map((_, i) => i).filter((i) => i !== target.index)];
         const hit = order.find((i) => editor.paragraphs[i].text.toLowerCase().includes(want));
@@ -1007,6 +1209,7 @@ async function runCommand(cmd, heard) {
 function startTalk() {
   if (!dictation.available) return toast('Voice input needs the Cadence app, Safari or Chrome.', 'error');
   talk.on = true;
+  talk.stopping = false;
   dictation.start({ continuous: true });
   setTalkUi(true);
   caption('cadence', player.playing ? 'Listening. Talk any time to interrupt.' : 'Listening. Say continue to start reading, or tell me what to change.');
@@ -1014,6 +1217,9 @@ function startTalk() {
 
 function stopTalk() {
   talk.on = false;
+  // The recogniser sends a last final transcript when it stops; ignore it.
+  talk.stopping = true;
+  setTimeout(() => { talk.stopping = false; }, 1500);
   dictation.stop();
   setTalkUi(false);
 }
@@ -1026,7 +1232,7 @@ function setTalkUi(on) {
   for (const b of [$('#talkBtn'), $('#micBtn')]) b.setAttribute('aria-pressed', String(on));
   $('#talkBtn span').textContent = on ? 'Talking' : 'Talk';
   $('#micBtn span').textContent = on ? 'Talking' : 'Talk';
-  if (!on) $('#caption').hidden = true;
+  if (!on) { $('#caption').hidden = true; $('#positionLabel').hidden = false; }
 }
 
 dictation.addEventListener('state', (e) => {
@@ -1034,11 +1240,14 @@ dictation.addEventListener('state', (e) => {
 });
 dictation.addEventListener('partial', (e) => {
   const text = e.detail;
+  if (talk.stopping) return;
   if (!talk.on) { $('#askInput').value = text; return; }
   const speaking = player.playing || !player.audio.paused;
   if (speaking) {
     const ctx = echoContext();
-    if (!isBargeIn(text, ctx)) return; // the microphone is hearing Cadence's own voice
+    const reply = !player.playing && !player.audio.paused ? talk.lastSaid : '';
+    if (!isBargeIn(text, ctx, { pending: editor.suggestions.length > 0 || tracker.hunks.length > 0, reply })) return; // the microphone is hearing Cadence's own voice
+    if (reply) ctx.push(reply);
     talk.bargeCtx = ctx; // keep it to strip the echo from the final transcript
     player.pause();
     player.stopAudio();
@@ -1046,10 +1255,14 @@ dictation.addEventListener('partial', (e) => {
   caption('you', talk.bargeCtx ? cleanTranscript(text, talk.bargeCtx) : text);
 });
 dictation.addEventListener('final', (e) => {
+  if (talk.stopping) return;
+  if (!talk.on) { if (!dictation.continuous) $('#askInput').value = e.detail; return; }
   const speaking = player.playing || !player.audio.paused;
-  if (talk.on && speaking && !isBargeIn(e.detail, echoContext())) return;
-  const ctx = talk.bargeCtx || (speaking ? echoContext() : []);
+  const reply = !player.playing && !player.audio.paused ? talk.lastSaid : '';
+  if (speaking && !isBargeIn(e.detail, echoContext(), { pending: editor.suggestions.length > 0 || tracker.hunks.length > 0, reply })) return;
+  const ctx = talk.bargeCtx || (speaking ? [...echoContext(), ...(reply ? [reply] : [])] : []);
   talk.bargeCtx = null;
+  talk.readLog = player.current ? [player.current.text] : [];
   const heard = ctx.length ? cleanTranscript(e.detail, ctx) : e.detail.trim();
   if (!heard) return;
   caption('you', heard);
@@ -1067,7 +1280,7 @@ function resolveCommentTarget() {
   if ($('#commentGeneral').checked) return null;
   const p = pendingSelectionTarget;
   if (p && editor.paragraphs[p.index]?.text.slice(p.start, p.end) === p.text) {
-    return { paraId: editor.paragraphs[p.index].id, quote: p.text, index: p.index };
+    return { paraId: editor.paragraphs[p.index].id, quote: p.text, at: p.start, index: p.index };
   }
   const index = Math.max(0, editor.getCaret()?.index ?? state.pausePoint?.paraIndex ?? editor.currentIndex);
   const para = editor.paragraphs[index];
@@ -1080,7 +1293,7 @@ function updateCommentTargetLabel() {
   $('#commentTarget').textContent = !t
     ? 'Comment on the whole document'
     : t.quote
-      ? `Comment on "${t.quote.length > 50 ? t.quote.slice(0, 50) + '…' : t.quote}" in paragraph ${t.index + 1}`
+      ? `Comment on “${t.quote.length > 50 ? t.quote.slice(0, 50) + '…' : t.quote}” in paragraph ${t.index + 1}`
       : `Comment on paragraph ${t.index + 1}`;
 }
 
@@ -1098,8 +1311,9 @@ $('#commentForm').addEventListener('submit', (e) => {
   const text = $('#commentInput').value.trim();
   if (!text) return $('#commentInput').focus();
   const t = resolveCommentTarget();
-  comments.add({ paraId: t?.paraId || null, quote: t?.quote || '', text });
+  comments.add({ paraId: t?.paraId || null, quote: t?.quote || '', at: t?.at, text, author: state.config?.reviewerName || '' });
   $('#commentInput').value = '';
+  revealInDocument();
   pendingSelectionTarget = null;
   $('#commentGeneral').checked = false;
   updateCommentTargetLabel();
@@ -1166,7 +1380,7 @@ async function toggleTracking(force) {
     toast('Tracking changes');
   } else if (tracker.on || tracker.baseline) {
     const n = tracker.hunks.length;
-    if (n && !(await confirmDialog(`Stop tracking? The ${n} pending change${n === 1 ? '' : 's'} will be kept in the text as accepted. Reject any you do not want first.`))) {
+    if (n && !(await confirmDialog(`Stop tracking? The ${n} pending change${n === 1 ? '' : 's'} will be kept in the text as accepted. Reject any you do not want first.`, 'Stop tracking'))) {
       setTrackUi();
       return;
     }
@@ -1193,7 +1407,7 @@ $('#changePrev').addEventListener('click', () => { revealInDocument(); tracker.s
 $('#acceptAll').addEventListener('click', () => { const n = tracker.acceptAll(); if (n) toast(`Accepted ${n} change${n === 1 ? '' : 's'}`); });
 $('#rejectAll').addEventListener('click', async () => {
   const n = tracker.hunks.length;
-  if (!n || !(await confirmDialog(`Reject all ${n} change${n === 1 ? '' : 's'} and go back to the text as it was when tracking started? Cmd+Z undoes this.`))) return;
+  if (!n || !(await confirmDialog(`Reject all ${n} change${n === 1 ? '' : 's'} and go back to the text as it was when tracking started? Cmd+Z undoes this.`, 'Reject all'))) return;
   tracker.rejectAll();
   toast(`Rejected ${n} change${n === 1 ? '' : 's'}`);
 });
@@ -1208,7 +1422,7 @@ $('#changeList').addEventListener('keydown', (e) => {
 
 // ---------- Word choice ----------
 
-wordChoice.addEventListener('applied', (e) => toast(`Changed to "${e.detail}". Cmd+Z to undo.`));
+wordChoice.addEventListener('applied', (e) => toast(`Changed to “${e.detail}”. Cmd+Z to undo.`));
 document.addEventListener('mousedown', (e) => { if (!$('#choicePop').hidden && !e.target.closest('#choicePop')) wordChoice.hide(); });
 
 // ---------- Selection word count ----------
@@ -1240,17 +1454,23 @@ try { if (localStorage.getItem('cadence_focus')) setFocusMode(true); } catch (e)
 // The panel is docked beside the page and can be resized by dragging its edge.
 // In a narrow window it takes the whole width instead of covering the page.
 const PANEL_MIN = 300;
-const PANEL_DEFAULT = 380;
+const PANEL_DEFAULT = 400;
 const narrow = () => window.innerWidth < 820;
 function panelMax() { return Math.max(PANEL_MIN, Math.min(720, window.innerWidth - 420)); }
+// aria-valuemax follows the window size
 function setPanelWidth(w, save = true) {
   const width = Math.round(Math.min(panelMax(), Math.max(PANEL_MIN, w)));
   document.documentElement.style.setProperty('--panel-w', `${width}px`);
   $('#panelResize').setAttribute('aria-valuenow', String(width));
+  $('#panelResize').setAttribute('aria-valuemin', String(PANEL_MIN));
+  $('#panelResize').setAttribute('aria-valuemax', String(panelMax()));
   if (save) try { localStorage.setItem('cadence_panel_w', String(width)); } catch (e) {}
 }
 function setPanelVisible(show) {
+  const hadFocus = $('#panel').contains(document.activeElement);
   $('#editorView').classList.toggle('panel-hidden', !show);
+  // Closing the panel with focus inside it puts the caret back in the text.
+  if (!show && hadFocus) returnFocus();
   $('#panelToggle').setAttribute('aria-pressed', String(show));
   if (!narrow()) try { localStorage.setItem('cadence_panel_hidden', show ? '' : '1'); } catch (e) {}
 }
@@ -1263,11 +1483,21 @@ function revealInDocument() {
   if (narrow() && !$('#editorView').classList.contains('panel-hidden')) setPanelVisible(false);
 }
 function selectTab(tab) {
-  $$('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === tab)));
+  $$('.tab').forEach((t) => {
+    const on = t.dataset.tab === tab;
+    t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1; // one tab stop for the tab list; arrows move between tabs
+    if (on) t.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  });
   $$('.tabpanel').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
   try { localStorage.setItem('cadence_tab', tab); } catch (e) {}
 }
-$$('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
+$$('.tab').forEach((t) => {
+  t.id = `tab-${t.dataset.tab}`;
+  t.setAttribute('aria-controls', `panel-${t.dataset.tab}`);
+  t.addEventListener('click', () => selectTab(t.dataset.tab));
+});
+$$('.tabpanel').forEach((p) => { p.id = `panel-${p.dataset.panel}`; p.setAttribute('role', 'tabpanel'); p.setAttribute('aria-labelledby', `tab-${p.dataset.panel}`); });
 $('.tabs').addEventListener('keydown', (e) => {
   if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
   const tabs = $$('.tab');
@@ -1303,9 +1533,11 @@ $('#panelClose').addEventListener('click', () => setPanelVisible(false));
   });
   handle.addEventListener('dblclick', () => setPanelWidth(PANEL_DEFAULT));
   handle.addEventListener('keydown', (e) => {
-    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    const w = $('#panel').getBoundingClientRect().width;
+    const next = { ArrowLeft: w + 24, ArrowRight: w - 24, Home: PANEL_MIN, End: panelMax() }[e.key];
+    if (next === undefined) return;
     e.preventDefault();
-    setPanelWidth($('#panel').getBoundingClientRect().width + (e.key === 'ArrowLeft' ? 24 : -24));
+    setPanelWidth(next);
   });
   let saved = PANEL_DEFAULT;
   try { saved = Number(localStorage.getItem('cadence_panel_w')) || PANEL_DEFAULT; } catch (e) {}
@@ -1339,30 +1571,18 @@ async function loadRevisions() {
 }
 
 function compareVersion(rev) {
+  // Paragraphs are matched by their ids, so one new paragraph does not make the rest look rewritten.
   const now = editor.paragraphs;
-  const byId = new Map(now.map((p, i) => [p.id, i]));
+  const result = trackChanges(rev.paragraphs.map((p) => ({ ...p })), now);
   const blocks = [];
-  let added = 0;
-  let removed = 0;
-  const seen = new Set();
-  rev.paragraphs.forEach((old, i) => {
-    const j = byId.has(old.id) ? byId.get(old.id) : i < now.length && !rev.paragraphs.some((x) => x.id === now[i].id) ? i : -1;
-    const cur = j >= 0 ? now[j] : null;
-    if (cur) seen.add(cur.id);
-    const before = old.text;
-    const after = cur ? cur.text : '';
-    if (before === after) return;
-    const wb = before.split(/\s+/).filter(Boolean).length;
-    const wa = after.split(/\s+/).filter(Boolean).length;
-    added += Math.max(0, wa - wb);
-    removed += Math.max(0, wb - wa);
-    blocks.push(`<div class="compare-para"><div class="where">${cur ? `Paragraph ${j + 1}` : 'Removed since this version'}</div>${computeWordDiffHtml(before, after)}</div>`);
-  });
-  now.forEach((p, j) => {
-    if (seen.has(p.id) || rev.paragraphs.some((x) => x.id === p.id)) return;
-    if (!p.text.trim()) return;
-    added += p.text.split(/\s+/).filter(Boolean).length;
-    blocks.push(`<div class="compare-para"><div class="where">Paragraph ${j + 1}, new since this version</div><ins>${escapeHtml(p.text)}</ins></div>`);
+  const segHtml = (segs) => segs.map((x) => (x.type === 'same' ? escapeHtml(x.text) : `<${x.type}>${escapeHtml(x.text)}</${x.type}>`)).join('');
+  const removedAfter = (id) => result.deleted.filter((d) => d.afterId === id && !d.moved && d.text.trim()).map((d) => `<div class="compare-para"><div class="where">Removed since this version</div><del>${escapeHtml(d.text)}</del></div>`);
+  blocks.push(...removedAfter(null));
+  result.paragraphs.forEach((p, j) => {
+    if (p.status === 'changed') blocks.push(`<div class="compare-para"><div class="where">Paragraph ${j + 1}${p.moved ? ', moved' : ''}</div>${segHtml(p.segments)}</div>`);
+    else if (p.status === 'inserted' && now[j].text.trim()) blocks.push(`<div class="compare-para"><div class="where">Paragraph ${j + 1}, new since this version</div><ins>${escapeHtml(now[j].text)}</ins></div>`);
+    else if (p.moved) blocks.push(`<div class="compare-para"><div class="where">Paragraph ${j + 1}, moved</div>${escapeHtml(now[j].text)}</div>`);
+    blocks.push(...removedAfter(p.id));
   });
   $('#compareTitle').textContent = `${rev.reason || 'Version'}, ${new Date(rev.createdAt).toLocaleString('en-CA', { dateStyle: 'medium', timeStyle: 'short' })}`;
   $('#compareSummary').textContent = blocks.length
@@ -1390,16 +1610,34 @@ $('#snapshotBtn').addEventListener('click', async () => {
 // ---------- Export ----------
 
 const exportMenu = $('#exportMenu');
+function setExportMenu(open, { focus = true } = {}) {
+  exportMenu.hidden = !open;
+  $('#exportBtn').setAttribute('aria-expanded', String(open));
+  if (open && focus) exportMenu.querySelector('[role="menuitem"]').focus();
+}
 $('#exportBtn').addEventListener('click', (e) => {
   e.stopPropagation();
-  exportMenu.hidden = !exportMenu.hidden;
-  $('#exportBtn').setAttribute('aria-expanded', String(!exportMenu.hidden));
-  if (!exportMenu.hidden) exportMenu.querySelector('a').focus();
+  setExportMenu(exportMenu.hidden);
 });
-document.addEventListener('click', () => { exportMenu.hidden = true; $('#exportBtn').setAttribute('aria-expanded', 'false'); });
+$('#exportBtn').addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') { e.preventDefault(); setExportMenu(true); }
+});
+exportMenu.addEventListener('keydown', (e) => {
+  const items = [...exportMenu.querySelectorAll('[role="menuitem"]')];
+  const i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i - 1 + items.length) % items.length].focus(); }
+  else if (e.key === 'Home') { e.preventDefault(); items[0].focus(); }
+  else if (e.key === 'End') { e.preventDefault(); items.at(-1).focus(); }
+  else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setExportMenu(false); $('#exportBtn').focus(); }
+  else if (e.key === 'Tab') setExportMenu(false, { focus: false });
+});
+document.addEventListener('click', (e) => { if (!e.target.closest('#exportMenu')) setExportMenu(false, { focus: false }); });
 exportMenu.addEventListener('click', async (e) => {
   const a = e.target.closest('[data-export]');
   if (!a) return;
+  setExportMenu(false, { focus: false });
+  $('#exportBtn').focus();
   await flushSave();
   const kind = a.dataset.export;
   const fmt = kind.startsWith('docx') ? 'docx' : kind;
@@ -1510,19 +1748,24 @@ document.addEventListener('click', (e) => {
   else if (cmd === 'library') showLibrary();
 });
 
+const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 window.addEventListener('keydown', (e) => {
-  if ($('#settingsDialog').open || $('#confirmDialog').open) return;
+  // Nothing fires behind an open dialog.
+  if (document.querySelector('dialog[open]')) return;
   const inEditor = $('#editorView').hidden === false;
   const typing = e.target.closest?.('input, textarea, select, [contenteditable]');
-  const mod = e.metaKey || e.ctrlKey;
+  const inField = e.target.closest?.('input, textarea, select');
+  // On a Mac, Control shortcuts belong to text editing (Control+N, Control+F and so on), so only Command counts.
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey || e.metaKey;
 
   if (mod && e.key.toLowerCase() === 'o') { e.preventDefault(); $('#fileInput').click(); return; }
-  if (mod && e.key.toLowerCase() === 'n') { e.preventDefault(); newDocument(); return; }
+  if (mod && !e.shiftKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newDocument(); return; }
   if (mod && e.key === ',') { e.preventDefault(); openSettings(); return; }
   if (!inEditor) return;
 
-  if (e.altKey && (e.code === 'Space')) { e.preventDefault(); togglePlay(); return; }
-  if (e.altKey && !mod && e.code === 'KeyM') { e.preventDefault(); toggleTalk(); return; }
+  if (e.altKey && !mod && e.code === 'Space') { e.preventDefault(); togglePlay(); return; }
+  // Talk: Cmd+Shift+M anywhere. Option+M too, except in text, where on a Mac it types µ.
+  if ((mod && e.shiftKey && e.code === 'KeyM') || (e.altKey && !mod && !typing && e.code === 'KeyM')) { e.preventDefault(); toggleTalk(); return; }
   if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openPanel('edit'); $('#askInput').focus(); return; }
   if (mod && !e.shiftKey && e.code === 'KeyF') { e.preventDefault(); finder.open({ withReplace: e.altKey }); return; }
   if (mod && e.shiftKey && e.code === 'KeyF') { e.preventDefault(); $('#focusToggle').click(); return; }
@@ -1531,27 +1774,42 @@ window.addEventListener('keydown', (e) => {
   if (mod && e.key === '\\') { e.preventDefault(); $('#panelToggle').click(); return; }
   if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); state.dirty = true; flushSave(); return; }
   if (mod && e.key === 'Enter') {
+    if (inField) return; // Cmd+Enter in a text box submits that box only
     const idx = editor.getCaret()?.index ?? editor.currentIndex;
-    const s = editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id) || editor.suggestions.at(-1);
+    const s = editor.suggestions.find((x) => x.paraId === editor.paragraphs[idx]?.id);
     if (s) { e.preventDefault(); handleSuggestion(s.id, 'accept'); }
     return;
   }
   if (mod && e.shiftKey && e.code === 'KeyE') { e.preventDefault(); toggleTracking(); return; }
+  // Undo and redo still work after clicking a button in the panel (Change all, Accept).
+  if (mod && e.code === 'KeyZ' && !typing) { e.preventDefault(); (e.shiftKey ? editor.redo() : editor.undo()); return; }
+  // Cmd+[ and Cmd+] move a sentence while reading, even with the cursor in the text.
+  if (mod && (e.key === '[' || e.key === ']') && player.queue.length) { e.preventDefault(); player.jump(e.key === '[' ? -1 : 1); return; }
   if (e.key === 'Escape') {
-    if (!$('#choicePop').hidden) { wordChoice.hide(); return; }
+    if (!$('#choicePop').hidden) { wordChoice.hide(); returnFocus(); return; }
     if (tracker.view === 'all' && !typing) { tracker.setView('simple'); return; }
-    if (!$('#issuePop').hidden) { language.hide(); return; }
-    if (finder.isOpen) { finder.close(); return; }
-    if (!selBar.hidden) { selBar.hidden = true; return; }
+    if (!$('#issuePop').hidden) { language.hide(); returnFocus(); return; }
+    if (finder.isOpen) { finder.close(); returnFocus(); return; }
+    if (!selBar.hidden) { selBar.hidden = true; returnFocus(); return; }
     if (player.playing) { player.pause(); return; }
     if (dictation.listening) { dictation.stop(); return; }
+    if (inField && e.target.closest('#panel')) { returnFocus(); return; }
   }
-  if (!typing || player.playing) {
-    if (e.key === ' ' && !typing) { e.preventDefault(); togglePlay(); }
-    else if (e.key === '[' && player.queue.length) { e.preventDefault(); player.jump(-1); }
-    else if (e.key === ']' && player.queue.length) { e.preventDefault(); player.jump(1); }
+  // Space plays only when nothing else wants it: not on a button, tab, link or text.
+  const plain = e.target === document.body || e.target.closest?.('#strip, .player .position');
+  if (e.key === ' ' && plain && !typing) { e.preventDefault(); togglePlay(); return; }
+  if (!typing && player.queue.length) {
+    if (e.key === '[') { e.preventDefault(); player.jump(-1); }
+    else if (e.key === ']') { e.preventDefault(); player.jump(1); }
   }
 });
+
+/** Put the caret back in the text after closing something. */
+function returnFocus() {
+  const c = editor.getCaret();
+  if (c) editor.setCaret(c.index, c.offset, { scroll: false });
+  else editor.setCaret(editor.currentIndex, 0, { scroll: false });
+}
 
 // ---------- Start ----------
 

@@ -12,6 +12,12 @@ export class WordChoice extends EventTarget {
     this.target = null; // { index, start, end, text }
     this.token = 0;
     pop.addEventListener('mousedown', (e) => e.preventDefault());
+    pop.addEventListener('keydown', (e) => {
+      const items = [...pop.querySelectorAll('.choice')];
+      const i = items.indexOf(document.activeElement);
+      if (['ArrowDown', 'ArrowRight'].includes(e.key)) { e.preventDefault(); items[(i + 1) % items.length]?.focus(); }
+      if (['ArrowUp', 'ArrowLeft'].includes(e.key)) { e.preventDefault(); items[(i - 1 + items.length) % items.length]?.focus(); }
+    });
     pop.addEventListener('click', (e) => {
       const b = e.target.closest('[data-choice]');
       if (b) this.apply(b.dataset.choice);
@@ -50,6 +56,7 @@ export class WordChoice extends EventTarget {
         .join('');
       this.render(short ? `Synonyms for “${escapeHtml(target.text.trim())}”` : 'Other ways to say it', `<div class="${short ? 'choices words' : 'choices'}">${items}</div>${note ? `<p class="muted small">${escapeHtml(note)}</p>` : ''}`);
       this.place(rect);
+      this.pop.querySelector('.choice')?.focus({ preventScroll: true });
     } catch (err) {
       if (token === this.token) this.render('Word choice', `<p class="muted small">${escapeHtml(err.message)}</p>`);
     }

@@ -33,7 +33,7 @@
   --r-m: 10px;
   --bar-h: 52px;
   --player-h: 64px;
-  --panel-w: 380px;
+  --panel-w: 400px;
   color-scheme: light;
 }
 
@@ -135,6 +135,8 @@ textarea { resize: vertical; width: 100%; line-height: 1.45; }
 /* Top bar */
 .view { height: 100vh; display: flex; flex-direction: column; }
 .bar {
+  /* The bar's blur makes its own stacking layer; lift it so the Export menu opens above the page and panel. */
+  position: relative; z-index: 30;
   height: var(--bar-h); flex: none;
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 0 14px; border-bottom: 1px solid var(--rule);
@@ -244,11 +246,11 @@ del { color: var(--del); text-decoration-thickness: 1.5px; }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing .desk { pointer-events: none; }
 .editor.panel-hidden .panel { display: none; }
-.tabs { flex: 1; min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, auto); justify-content: start; gap: 2px; }
+.tabs { flex: 1; min-width: 0; display: flex; gap: 0; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tab {
-  border: 0; background: transparent; padding: 5px 7px; font-size: 13px; white-space: nowrap; border-radius: var(--r-s);
-  cursor: pointer; color: var(--muted); font-weight: 550; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  flex: none; border: 0; background: transparent; padding: 5px 6px; font-size: 12.5px; white-space: nowrap; border-radius: var(--r-s);
+  cursor: pointer; color: var(--muted); font-weight: 550; display: inline-flex; align-items: center; gap: 4px;
 }
 .tab:hover { color: var(--ink); }
 .tab .count { margin-left: 0; }
@@ -316,8 +318,8 @@ body.resizing .desk { pointer-events: none; }
   background: var(--paper); border: 1px solid var(--rule); border-radius: var(--r-m); box-shadow: var(--shadow); padding: 5px;
   transform-origin: top right; animation: pop 160ms cubic-bezier(0.2, 0.9, 0.3, 1);
 }
-.menu a { display: block; padding: 7px 10px; border-radius: var(--r-s); cursor: pointer; text-decoration: none; color: inherit; }
-.menu a:hover, .menu a:focus { background: var(--accent-soft); outline: none; }
+.menu [role='menuitem'] { display: block; width: 100%; text-align: left; border: 0; background: transparent; font: inherit; padding: 7px 10px; border-radius: var(--r-s); cursor: pointer; color: inherit; }
+.menu [role='menuitem']:hover, .menu [role='menuitem']:focus-visible { background: var(--accent-soft); outline: none; }
 @keyframes pop { from { opacity: 0; transform: scale(0.97); } }
 
 .sel-toolbar {
@@ -374,12 +376,16 @@ body.resizing .desk { pointer-events: none; }
 }
 @media (max-width: 720px) {
   .drop-hint { display: none; }
-  .player { grid-template-columns: auto 1fr; }
-  .voice-controls { display: none; }
+  .player { gap: 10px; padding: 0 10px; }
+  /* Keep Talk on small windows; the voice and speed lists move to Settings. */
+  #voiceSelect, #rateSelect { display: none; }
+  #talkBtn span { display: none; }
+  .bar-actions { gap: 2px; }
+  #trackToggle { padding: 0 8px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
   .bar, .player { backdrop-filter: none; background: var(--surface); }
@@ -472,7 +478,7 @@ body.resizing .desk { pointer-events: none; }
   margin-left: -32px; padding-left: 32px;
   background: linear-gradient(var(--del), var(--del)) no-repeat 0 0.45em / 2px calc(100% - 0.9em);
 }
-.para[data-track].current::after { left: 10px; }
+.para[data-track].current::after { display: none; }
 .track-btn[aria-pressed='true'] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .markup { cursor: default; }
 .markup .para { white-space: pre-wrap; }
@@ -552,3 +558,38 @@ body.resizing .desk { pointer-events: none; }
 }
 .player .caption[hidden] { display: none; }
 #docStats { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+/* Talk captions can wrap to two lines so help and replies are readable */
+.player .caption { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.35; }
+.player .caption[hidden] { display: none; }
+#docStats.over { color: var(--danger); font-weight: 550; }
+.comment-item .author { color: var(--muted); font-weight: 500; margin-left: 6px; }
+.status .btn.subtle { height: 22px; padding: 0 6px; font-size: 12.5px; }
+#libraryStatus { flex: 1; margin: 0 12px; }
+/* Settings keeps its buttons on screen in short windows */
+.dialog .dialog-actions { position: sticky; bottom: -1px; background: var(--paper); padding-top: 10px; padding-bottom: 2px; }
+.change .change-plain { color: var(--ins); }
+.markup .moved-from del { text-decoration-style: double; }
+@media (max-width: 640px) { .paper { padding: 24px 18px 60px; } .title-input { min-width: 60px; } }
+.para[data-comments]::before { right: -40px; }
+@container (max-width: 640px) { .para[data-comments]::before { right: -30px; } }
+
+.shortcuts > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.shortcuts > summary::-webkit-details-marker { display: none; }
+.shortcuts > summary::before { content: ''; width: 6px; height: 6px; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: rotate(-45deg); transition: transform 120ms; }
+.shortcuts[open] > summary::before { transform: rotate(45deg); }
+
+/* Top bar: the title and messages give way first, the buttons always stay on screen. */
+.bar-left { overflow: hidden; }
+.bar-left { flex: 1 1 auto; min-width: 0; }
+.bar-actions { flex: none; }
+.title-input { flex: 0 1 auto; min-width: 80px; width: min(36vw, 460px); }
+.bar .status { flex: 1 1 0; min-width: 0; max-width: none; }
+#docStats { flex: 0 1 auto; }
+@media (max-width: 700px) {
+  #focusToggle, #findToggle { display: none; }
+  .title-input { width: 30vw; }
+}
+/* Tabs: tighter, and the selected one is always scrolled into view. */
+.tab { padding: 5px 5px; }
+.tab .count { min-width: 16px; padding: 0 4px; font-size: 11px; }

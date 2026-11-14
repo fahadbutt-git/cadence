@@ -43,7 +43,7 @@ npm run app          # development build of the app, runs from this folder
 - The strip in the player shows every sentence as a bar sized by its length, so you can see the rhythm of the piece. Orange bars contain a flagged phrase. Click any bar to listen from there.
 - Select text to get a small toolbar: Listen, Tighten, Clean up, Rewrite, Heading.
 - Suggestions appear under their paragraph with the change marked. Accept (Cmd+Enter), Listen or Reject. Cmd+Z undoes an accepted edit.
-- **Talk** (Option+M, or the Talk button) keeps the microphone open while Cadence reads. Speak at any time: it pauses, acts on what you said, and picks back up when you say "continue". Commands include continue, pause, back, next, repeat, start over, go to paragraph three, faster, slower, accept, reject, read it, undo, what is flagged, save a version, help and stop listening. Anything else is treated as an edit to the sentence you interrupted ("tighten this", "replace pivotal with important", "make the ending more concrete"). Cadence ignores its own reading voice, but headphones make it more reliable.
+- **Talk** (Cmd+Shift+M, or the Talk button) keeps the microphone open while Cadence reads. Speak at any time: it pauses, acts on what you said, and picks back up when you say "continue". Commands include continue, pause, back, next, repeat, start over, go to paragraph three, faster, slower, accept, reject, read it, undo, what is flagged, save a version, help and stop listening. Anything else is treated as an edit to the sentence you interrupted ("tighten this", "replace pivotal with important", "make the ending more concrete"). Cadence ignores its own reading voice, but headphones make it more reliable.
 - **Comments.** Leave notes on the whole document, a paragraph or a phrase (Comments tab, the selection toolbar, Cmd+Option+M, or say "comment ..." while Talk is on). Get editor feedback adds mentor-style comments for you. Suggest edit turns a comment into a proposed change. Word export keeps them as real Word comments.
 - **Spelling and grammar** are checked on this Mac with [Harper](https://writewithharper.com) in Canadian English. Click an underline for fixes. Add names and terms to your dictionary.
 - **Checks** also covers stock AI phrasing (dashes, semicolons, contrast frames, "-ing" tails), clarity (long sentences, passive voice, adverbs, fillers, hedges) and style (clichés, repeated words, repeated openings), with a reading grade level. Each group can be switched off.
@@ -67,18 +67,24 @@ npm run app          # development build of the app, runs from this folder
 | Keys | Action |
 | --- | --- |
 | Option+Space | Read from cursor, or pause |
-| Escape | Stop reading, close the toolbar |
-| [ and ] | Previous or next sentence while reading |
-| Option+M | Speak an instruction |
+| Escape | Stop reading, close a toolbar or pop-up |
+| Cmd+[ and Cmd+] | Previous or next sentence while reading |
+| Cmd+Shift+M | Talk on or off (Option+M also works outside text) |
 | Cmd+K | Type an instruction |
+| Cmd+F, Cmd+Option+F | Find, or find and replace |
+| Cmd+G, Cmd+Shift+G | Next or previous match |
+| Cmd+Option+M | Comment on the selection or paragraph |
+| Cmd+Shift+E | Track changes on or off |
+| A or R in the Changes list | Accept or reject the focused change |
+| Cmd+Shift+F | Focus mode |
 | Cmd+Enter | Accept the suggestion for this paragraph |
 | Cmd+Z, Cmd+Shift+Z | Undo, redo |
 | Cmd+Shift+H | Toggle heading |
-| Cmd+Shift+E | Track changes on or off |
 | Option+Shift+Up or Down | Move the paragraph up or down |
-| A or R in the Changes list | Accept or reject the focused change |
 | Cmd+\\ | Show or hide the panel |
+| Cmd+S | Save now |
 | Cmd+N, Cmd+O, Cmd+, | New, import, settings |
+| Cmd+Plus, Cmd+Minus, Cmd+0 | Larger or smaller text, actual size (Mac app) |
 
 ## Layout
 

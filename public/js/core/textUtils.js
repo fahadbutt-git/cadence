@@ -19,7 +19,7 @@ export const BANNED_WORDS = [
 // Older name kept for compatibility.
 export const BANNED_RLHF_WORDS = BANNED_WORDS;
 
-const ADVERB_EXCEPTIONS = new Set(['only', 'family', 'early', 'likely', 'unlikely', 'reply', 'supply', 'apply', 'july', 'italy', 'holy', 'ugly', 'daily', 'friendly', 'lonely', 'elderly', 'ally', 'belly', 'bully', 'jelly', 'rally', 'silly', 'rely', 'comply', 'imply', 'multiply', 'assembly', 'anomaly', 'monopoly', 'emily', 'kelly', 'lily', 'molly', 'polly', 'sally', 'holly', 'billy', 'fly', 'butterfly', 'curly', 'costly', 'lively', 'lovely', 'timely', 'weekly', 'monthly', 'yearly', 'hourly', 'nightly', 'orderly', 'scholarly', 'deadly', 'oily', 'hilly', 'chilly', 'anomaly']);
+const ADVERB_EXCEPTIONS = new Set(['respectively', 'approximately', 'significantly', 'statistically', 'clinically', 'previously', 'only', 'family', 'early', 'likely', 'unlikely', 'reply', 'supply', 'apply', 'july', 'italy', 'holy', 'ugly', 'daily', 'friendly', 'lonely', 'elderly', 'ally', 'belly', 'bully', 'jelly', 'rally', 'silly', 'rely', 'comply', 'imply', 'multiply', 'assembly', 'anomaly', 'monopoly', 'emily', 'kelly', 'lily', 'molly', 'polly', 'sally', 'holly', 'billy', 'fly', 'butterfly', 'curly', 'costly', 'lively', 'lovely', 'timely', 'weekly', 'monthly', 'yearly', 'hourly', 'nightly', 'orderly', 'scholarly', 'deadly', 'oily', 'hilly', 'chilly', 'anomaly']);
 const FILLERS = ['very', 'really', 'just', 'quite', 'actually', 'basically', 'literally', 'totally', 'somewhat', 'simply', 'truly', 'definitely', 'certainly', 'extremely', 'incredibly', 'absolutely'];
 const HEDGES = ['i think', 'i believe', 'i feel that', 'in my opinion', 'kind of', 'sort of', 'it seems', 'i hope to', 'i would like to', 'i want to be able to', 'perhaps', 'somewhat'];
 const CLICHES = [
@@ -35,6 +35,8 @@ const STOPWORDS = new Set('about above after again against because before being 
 
 const esc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+const REFERENCE_LIKE = /^\s*(\[?\d{1,3}[\].)]\s)|\bdoi[:\s]|\b(19|20)\d{2};\d+/i;
+
 // Check groups shown in the Checks tab. Each group can be switched off.
 export const CHECK_GROUPS = {
   house: 'Stock AI phrasing',
@@ -44,11 +46,13 @@ export const CHECK_GROUPS = {
 
 export const FLAG_RULES = [
   { kind: 'word', group: 'house', label: 'Stock AI word', pattern: new RegExp(`\\b(?:${BANNED_WORDS.join('|')})\\b`, 'gi') },
-  { kind: 'dash', group: 'house', label: 'Dash in running prose', pattern: /—|–|--/g },
-  { kind: 'semicolon', group: 'house', label: 'Semicolon', pattern: /;/g },
+  // Dashes between numbers are ranges (12–18, 24-2), not prose.
+  { kind: 'dash', group: 'house', label: 'Dash in running prose', pattern: /—|–|--/g, keep: (m, str, i) => !(/\d\s*$/.test(str.slice(0, i)) && /^\s*\d/.test(str.slice(i + m.length))) },
+  // Semicolons inside parentheses or before numbers belong to statistics and references: (…; P = .38), 2019;126(3).
+  { kind: 'semicolon', group: 'house', label: 'Semicolon', pattern: /;/g, keep: (m, str, i) => !REFERENCE_LIKE.test(str) && !/^\s*(\d|P\s*[=<>]|p\s*[=<>])/.test(str.slice(i + 1)) && (str.slice(0, i).split('(').length - str.slice(0, i).split(')').length) <= 0 },
   { kind: 'contrast', group: 'house', label: 'Contrast frame', pattern: /\brather than\b|\bnot (?:just |only |merely )?\w+(?: \w+)?, but\b/gi },
   { kind: 'tail', group: 'house', label: 'Explanation tail', pattern: /,\s*(?:ultimately\s+)?(?:highlighting|underscoring|demonstrating|showcasing|reflecting|emphasizing)\b/gi },
-  { kind: 'passive', group: 'clarity', label: 'Passive voice', pattern: /\b(?:am|is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?(?:\w{3,}ed|known|seen|given|taken|made|done|shown|written|born|brought|built|caught|chosen|drawn|driven|found|held|kept|led|left|lost|meant|met|paid|put|said|sent|sold|spent|taught|thought|told|understood|won|worn)\b(?:\s+by\b)?/gi },
+  { kind: 'passive', group: 'clarity', label: 'Passive voice', narrativeOnly: true, pattern: /\b(?:am|is|are|was|were|be|been|being)\s+(?:\w+ly\s+)?(?:\w{3,}ed|known|seen|given|taken|made|done|shown|written|born|brought|built|caught|chosen|drawn|driven|found|held|kept|led|left|lost|meant|met|paid|put|said|sent|sold|spent|taught|thought|told|understood|won|worn)\b(?:\s+by\b)?/gi },
   { kind: 'adverb', group: 'clarity', label: 'Adverb', pattern: /\b[a-z]{3,}ly\b/gi, keep: (m) => !ADVERB_EXCEPTIONS.has(m.toLowerCase()) && !FILLERS.includes(m.toLowerCase()) },
   { kind: 'filler', group: 'clarity', label: 'Filler word', pattern: new RegExp(`\\b(?:${FILLERS.join('|')})\\b`, 'gi'), keep: (m, str, i) => !/^\s+than\b/i.test(str.slice(i + m.length)) },
   { kind: 'hedge', group: 'clarity', label: 'Hedge', pattern: new RegExp(`\\b(?:${HEDGES.map(esc).join('|')})\\b`, 'gi') },
@@ -66,6 +70,8 @@ function echoFlags(str) {
     n++;
     const w = m[0].toLowerCase().replace(/'s$/, '');
     if (STOPWORDS.has(w)) continue;
+    // Capitalised words in mid-sentence are names; repeating a name is fine.
+    if (/^[A-Z]/.test(m[0]) && m.index > 0 && !/[.!?]\s*$/.test(str.slice(0, m.index))) continue;
     const prev = seen.get(w);
     if (prev !== undefined && n - prev <= 25) {
       out.push({ start: m.index, end: m.index + m[0].length, text: m[0], kind: 'echo', group: 'style', label: 'Repeated word nearby' });
@@ -97,12 +103,14 @@ function sentenceFlags(str) {
  * All flagged spans in a string: [{ start, end, text, kind, group, label, sentence? }], sorted by position.
  * groups: optional { house, clarity, style } booleans; missing means on.
  */
-export function findFlags(text = '', groups = null) {
+export function findFlags(text = '', groups = null, { style = 'narrative' } = {}) {
   const out = [];
   const str = String(text || '');
   const on = (g) => !groups || groups[g] !== false;
   for (const rule of FLAG_RULES) {
     if (!on(rule.group)) continue;
+    // Methods sections are written in the passive voice; academic style does not flag it.
+    if (rule.narrativeOnly && style === 'academic') continue;
     rule.pattern.lastIndex = 0;
     let m;
     while ((m = rule.pattern.exec(str)) !== null) {
@@ -111,7 +119,8 @@ export function findFlags(text = '', groups = null) {
       out.push({ start: m.index, end: m.index + m[0].length, text: m[0], kind: rule.kind, group: rule.group, label: rule.label });
     }
   }
-  if (on('style')) out.push(...echoFlags(str));
+  // Technical writing repeats its terms on purpose, so academic style skips "repeated word nearby".
+  if (on('style') && style !== 'academic') out.push(...echoFlags(str));
   out.push(...sentenceFlags(str).filter((f) => on(f.group)));
   // Drop word-level flags fully inside a longer word-level flag (for example "passion for" inside a cliché).
   const word = out.filter((f) => !f.sentence).sort((a, b) => a.start - b.start || b.end - a.end);
@@ -144,7 +153,7 @@ export function sentenceRanges(text = '') {
       const start = s.index + lead;
       out.push({ start, end: start + trimmed.length, text: trimmed });
     }
-    return out;
+    return mergeAbbreviations(str, out);
   }
   const re = /[^.!?]+[.!?]+["')\]]*|[^.!?]+$/g;
   let m;
@@ -152,6 +161,20 @@ export function sentenceRanges(text = '') {
     const lead = m[0].length - m[0].trimStart().length;
     const trimmed = m[0].trim();
     if (trimmed) out.push({ start: m.index + lead, end: m.index + lead + trimmed.length, text: trimmed });
+  }
+  return mergeAbbreviations(str, out);
+}
+
+const ABBREVIATION_END = /\b(?:Dr|Mr|Mrs|Ms|Prof|St|Sr|Jr|vs|etc|al|Fig|Figs|No|Vol|approx|Inc|Ltd|Co|e\.g|i\.e)\.$/;
+/** "Dr. Micieli showed me" is one sentence: join pieces that end in a title or common abbreviation. */
+function mergeAbbreviations(str, ranges) {
+  const out = [];
+  for (const r of ranges) {
+    const prev = out[out.length - 1];
+    if (prev && ABBREVIATION_END.test(prev.text)) {
+      prev.end = r.end;
+      prev.text = str.slice(prev.start, r.end);
+    } else out.push({ ...r });
   }
   return out;
 }
@@ -246,8 +269,11 @@ export function computeBurstinessStats(fullText = '') {
 /** Flat list of sentences to read, starting at a paragraph and sentence. */
 export function buildSentenceReadQueue(paragraphs = [], startParaIdx = 0, startSentIdx = 0) {
   const queue = [];
+  // Reading stops at a References heading unless you start inside the reference list.
+  const refAt = paragraphs.findIndex((p) => p?.type === 'heading' && /^(references|bibliography|works cited)\s*$/i.test(p.text || ''));
   paragraphs.forEach((p, pIdx) => {
     if (pIdx < startParaIdx) return;
+    if (refAt >= 0 && startParaIdx < refAt && pIdx >= refAt) return;
     const raw = typeof p === 'string' ? p : p?.text || '';
     sentenceRanges(raw).forEach((r, sIdx) => {
       if (pIdx === startParaIdx && sIdx < startSentIdx) return;
@@ -282,8 +308,8 @@ function lcsOps(a0, b0) {
 function lcsCore(a, b) {
   const m = a.length;
   const n = b.length;
-  // Very long rewrites: fall back to one replacement instead of a huge table.
-  if (m * n > 4e6) return [...a.map((t) => ['del', t]), ...b.map((t) => ['ins', t])];
+  // Long paragraphs: line up whole sentences first, then compare words inside the sentences that differ.
+  if (m * n > 4e6) return chunkedOps(a, b);
   const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
   for (let i = m - 1; i >= 0; i--) {
     for (let j = n - 1; j >= 0; j--) {
@@ -300,6 +326,53 @@ function lcsCore(a, b) {
   }
   while (i < m) ops.push(['del', a[i++]]);
   while (j < n) ops.push(['ins', b[j++]]);
+  return ops;
+}
+
+function sentenceChunks(tokens) {
+  const out = [];
+  let cur = [];
+  tokens.forEach((t, i) => {
+    cur.push(t);
+    if (/^[.!?]+$/.test(t) && (i + 1 >= tokens.length || /^\s+$/.test(tokens[i + 1]))) {
+      if (i + 1 < tokens.length) cur.push(tokens[i + 1]);
+      out.push(cur);
+      cur = [];
+    }
+  });
+  if (cur.length) out.push(cur);
+  // The whitespace after a sentence was pushed twice when it is also the next token; drop that copy.
+  for (let i = 1; i < out.length; i++) if (out[i - 1].length && out[i][0] === out[i - 1][out[i - 1].length - 1] && /^\s+$/.test(out[i][0])) out[i].shift();
+  return out.filter((c) => c.length);
+}
+
+function chunkedOps(a, b) {
+  const ca = sentenceChunks(a);
+  const cb = sentenceChunks(b);
+  const ka = ca.map((c) => c.join(''));
+  const kb = cb.map((c) => c.join(''));
+  if (ca.length * cb.length > 4e6) return [...a.map((t) => ['del', t]), ...b.map((t) => ['ins', t])];
+  const chunkOps = lcsCore(ka, kb);
+  const ops = [];
+  let i = 0;
+  let j = 0;
+  let pendDel = [];
+  let pendIns = [];
+  const flush = () => {
+    if (pendDel.length || pendIns.length) {
+      const da = pendDel.flat();
+      const db = pendIns.flat();
+      ops.push(...(da.length * db.length > 4e6 ? [...da.map((t) => ['del', t]), ...db.map((t) => ['ins', t])] : lcsCore(da, db)));
+    }
+    pendDel = [];
+    pendIns = [];
+  };
+  for (const [type] of chunkOps) {
+    if (type === 'same') { flush(); ops.push(...ca[i].map((t) => ['same', t])); i++; j++; }
+    else if (type === 'del') pendDel.push(ca[i++]);
+    else pendIns.push(cb[j++]);
+  }
+  flush();
   return ops;
 }
 
@@ -328,7 +401,13 @@ export function diffSegments(baseText = '', curText = '') {
 export function hunksFromSegments(paraId, segs) {
   const hunks = [];
   let h = null;
-  for (const s of segs) {
+  for (let k = 0; k < segs.length; k++) {
+    const s = segs[k];
+    // A single space between two edits joins them into one change ("IOP" -> "intraocular pressure").
+    if (s.type === 'same' && h && /^\s+$/.test(s.text) && segs[k + 1] && segs[k + 1].type !== 'same') {
+      h.del += s.text; h.ins += s.text; h.baseEnd = s.baseEnd; h.curEnd = s.curEnd;
+      continue;
+    }
     if (s.type === 'same') { h = null; continue; }
     if (!h) {
       h = { kind: 'text', paraId, del: '', ins: '', curStart: s.curStart, curEnd: s.curStart, baseStart: s.baseStart, baseEnd: s.baseStart };
@@ -341,25 +420,37 @@ export function hunksFromSegments(paraId, segs) {
   return hunks;
 }
 
+/** Ids of `ids` that are not in the longest common ordered subsequence with `other`: the moved ones. */
+function movedIds(baseOrder, curOrder) {
+  const common = new Set(baseOrder.filter((id) => curOrder.includes(id)));
+  const a = baseOrder.filter((id) => common.has(id));
+  const b = curOrder.filter((id) => common.has(id));
+  if (a.length * b.length > 4e6) return new Set();
+  const kept = new Set(lcsCore(a, b).filter((o) => o[0] === 'same').map((o) => o[1]));
+  return new Set([...common].filter((id) => !kept.has(id)));
+}
+
 /**
- * Compare baseline and current paragraph lists ({ id, text }).
- * Returns { paragraphs: [{ id, index, status, segments }], deleted: [{ id, text, afterId }], hunks: [...] } in document order.
+ * Compare baseline and current paragraph lists ({ id, type, text }).
+ * Returns { paragraphs: [{ id, index, status, segments, moved }], deleted: [{ id, text, afterId, type, moved }], hunks }
+ * in document order. Hunk kinds: text, para-ins, para-del, join, split, move, format.
  */
 export function trackChanges(baseline = [], current = []) {
   const baseById = new Map(baseline.map((p, i) => [p.id, { ...p, i }]));
   const curIds = new Set(current.map((p) => p.id));
+  const moved = movedIds(baseline.map((p) => p.id), current.map((p) => p.id));
   const paragraphs = [];
-  const hunks = [];
-  // Deleted baseline paragraphs, attached after the nearest earlier paragraph that still exists.
+  let hunks = [];
+  // Deleted baseline paragraphs (and the old place of moved ones), after the nearest earlier paragraph that stayed put.
   const deleted = [];
   let lastKept = null;
   for (const b of baseline) {
-    if (curIds.has(b.id)) { lastKept = b.id; continue; }
-    deleted.push({ id: b.id, text: b.text, afterId: lastKept, type: b.type });
+    if (curIds.has(b.id) && !moved.has(b.id)) { lastKept = b.id; continue; }
+    deleted.push({ id: b.id, text: b.text, afterId: lastKept, type: b.type, moved: moved.has(b.id) });
   }
   const pushDeletedAfter = (afterId) => {
-    for (const d of deleted.filter((x) => x.afterId === afterId)) {
-      if (d.text.trim()) hunks.push({ kind: 'para-del', id: `del:${d.id}`, paraId: d.id, del: d.text, ins: '', afterId });
+    for (const d of deleted.filter((x) => x.afterId === afterId && !x.moved)) {
+      if (d.text.trim()) hunks.push({ kind: 'para-del', id: `del:${d.id}`, paraId: d.id, del: d.text, ins: '', afterId, type: d.type });
     }
   };
   pushDeletedAfter(null);
@@ -368,32 +459,136 @@ export function trackChanges(baseline = [], current = []) {
     if (!b) {
       paragraphs.push({ id: p.id, index, status: 'inserted', segments: p.text ? [{ type: 'ins', text: p.text, curStart: 0, curEnd: p.text.length, baseStart: 0, baseEnd: 0 }] : [] });
       if (p.text.trim()) hunks.push({ kind: 'para-ins', id: `ins:${p.id}`, paraId: p.id, del: '', ins: p.text, curStart: 0, curEnd: p.text.length });
-    } else if (b.text === p.text) {
-      paragraphs.push({ id: p.id, index, status: 'same', segments: p.text ? [{ type: 'same', text: p.text, curStart: 0, curEnd: p.text.length, baseStart: 0, baseEnd: p.text.length }] : [] });
     } else {
-      const segments = diffSegments(b.text, p.text);
-      paragraphs.push({ id: p.id, index, status: 'changed', segments });
-      hunks.push(...hunksFromSegments(p.id, segments));
+      const isMoved = moved.has(p.id);
+      if (isMoved) hunks.push({ kind: 'move', id: `mv:${p.id}`, paraId: p.id, del: '', ins: p.text, curStart: 0, curEnd: p.text.length });
+      if ((b.type || 'body') !== (p.type || 'body')) hunks.push({ kind: 'format', id: `fmt:${p.id}`, paraId: p.id, from: b.type || 'body', to: p.type || 'body', del: '', ins: p.text, curStart: 0, curEnd: 0 });
+      if (b.text === p.text) {
+        paragraphs.push({ id: p.id, index, status: 'same', moved: isMoved, segments: p.text ? [{ type: 'same', text: p.text, curStart: 0, curEnd: p.text.length, baseStart: 0, baseEnd: p.text.length }] : [] });
+      } else {
+        const segments = diffSegments(b.text, p.text);
+        paragraphs.push({ id: p.id, index, status: 'changed', moved: isMoved, segments });
+        hunks.push(...hunksFromSegments(p.id, segments));
+      }
     }
     pushDeletedAfter(p.id);
   });
+  hunks = pairJoinsAndSplits(hunks, current, baseById);
   return { paragraphs, deleted, hunks };
 }
 
-/** Accepting a text change moves the baseline to the new wording for that span. */
+const squash = (t = '') => t.replace(/\s+/g, ' ').trim();
+
+/**
+ * Pressing Backspace at the start of a paragraph adds its text to the paragraph above and removes it:
+ * show that as one "joined" change. Enter in the middle does the opposite: one "split" change.
+ */
+function pairJoinsAndSplits(hunks, current, baseById) {
+  const out = [];
+  const used = new Set();
+  const curText = new Map(current.map((p) => [p.id, p.text]));
+  for (const h of hunks) {
+    if (used.has(h)) continue;
+    if (h.kind === 'para-del' && h.afterId) {
+      const add = hunks.find((x) => !used.has(x) && x.kind === 'text' && x.paraId === h.afterId && !x.del && x.curEnd === (curText.get(h.afterId) || '').length && squash(x.ins) === squash(h.del));
+      if (add) {
+        used.add(add);
+        const i = out.indexOf(add);
+        if (i >= 0) out.splice(i, 1);
+        out.push({ kind: 'join', id: `join:${h.paraId}`, paraId: h.afterId, removedId: h.paraId, removedType: h.type, del: '', ins: add.ins, text: h.del, curStart: add.curStart, curEnd: add.curEnd, baseStart: add.baseStart, baseEnd: add.baseEnd });
+        continue;
+      }
+    }
+    if (h.kind === 'para-ins') {
+      const idx = current.findIndex((p) => p.id === h.paraId);
+      const prev = current[idx - 1];
+      const base = prev && baseById.get(prev.id);
+      const cut = prev && hunks.find((x) => !used.has(x) && x.kind === 'text' && x.paraId === prev.id && !x.ins && base && x.baseEnd === base.text.length && squash(x.del) === squash(h.ins));
+      if (cut) {
+        used.add(cut);
+        const i = out.indexOf(cut);
+        if (i >= 0) out.splice(i, 1);
+        out.push({ kind: 'split', id: `split:${h.paraId}`, paraId: prev.id, newId: h.paraId, del: cut.del, ins: '', text: h.ins, curStart: cut.curStart, curEnd: cut.curEnd, baseStart: cut.baseStart, baseEnd: cut.baseEnd });
+        continue;
+      }
+    }
+    out.push(h);
+  }
+  return out;
+}
+
+/** Accepting a change moves the baseline to match the current text for that change. */
 export function acceptHunkInBaseline(baseline, hunk, current) {
-  const out = baseline.map((p) => ({ ...p }));
-  if (hunk.kind === 'text') {
-    const b = out.find((p) => p.id === hunk.paraId);
-    if (b) b.text = b.text.slice(0, hunk.baseStart) + hunk.ins + b.text.slice(hunk.baseEnd);
-  } else if (hunk.kind === 'para-del') {
-    return out.filter((p) => p.id !== hunk.paraId);
-  } else if (hunk.kind === 'para-ins') {
-    const curIndex = current.findIndex((p) => p.id === hunk.paraId);
+  let out = baseline.map((p) => ({ ...p }));
+  const insertAfterCurrentPredecessor = (para) => {
+    const curIndex = current.findIndex((p) => p.id === para.id);
     const prevIds = current.slice(0, curIndex).map((p) => p.id).reverse();
     const anchor = prevIds.find((id) => out.some((p) => p.id === id));
     const at = anchor ? out.findIndex((p) => p.id === anchor) + 1 : 0;
-    out.splice(at, 0, { ...current[curIndex] });
+    out.splice(at, 0, { ...para });
+  };
+  const textAccept = (h) => {
+    const b = out.find((p) => p.id === h.paraId);
+    if (b) b.text = b.text.slice(0, h.baseStart) + h.ins + b.text.slice(h.baseEnd);
+  };
+  if (hunk.kind === 'text') textAccept(hunk);
+  else if (hunk.kind === 'para-del') out = out.filter((p) => p.id !== hunk.paraId);
+  else if (hunk.kind === 'para-ins') insertAfterCurrentPredecessor(current.find((p) => p.id === hunk.paraId));
+  else if (hunk.kind === 'join') {
+    textAccept(hunk);
+    out = out.filter((p) => p.id !== hunk.removedId);
+  } else if (hunk.kind === 'split') {
+    textAccept(hunk);
+    insertAfterCurrentPredecessor(current.find((p) => p.id === hunk.newId));
+  } else if (hunk.kind === 'move') {
+    const para = out.find((p) => p.id === hunk.paraId);
+    out = out.filter((p) => p.id !== hunk.paraId);
+    insertAfterCurrentPredecessor(para);
+  } else if (hunk.kind === 'format') {
+    const b = out.find((p) => p.id === hunk.paraId);
+    if (b) b.type = hunk.to;
+  }
+  return out;
+}
+
+/** Rejecting a change puts the baseline version back into the current paragraphs. Returns the new list. */
+export function rejectHunkInCurrent(current, hunk, baseline) {
+  let out = current.map((p) => ({ ...p }));
+  const idx = (id) => out.findIndex((p) => p.id === id);
+  const base = (id) => baseline.find((p) => p.id === id);
+  const placeAfterBasePredecessor = (para) => {
+    const bi = baseline.findIndex((p) => p.id === para.id);
+    const prevIds = baseline.slice(0, bi).map((p) => p.id).reverse();
+    const anchor = prevIds.find((id) => idx(id) >= 0);
+    out.splice(anchor ? idx(anchor) + 1 : 0, 0, para);
+  };
+  if (hunk.kind === 'text') {
+    const p = out[idx(hunk.paraId)];
+    if (p) p.text = p.text.slice(0, hunk.curStart) + hunk.del + p.text.slice(hunk.curEnd);
+  } else if (hunk.kind === 'para-ins') {
+    out = out.filter((p) => p.id !== hunk.paraId);
+  } else if (hunk.kind === 'para-del') {
+    placeAfterBasePredecessor({ ...base(hunk.paraId) });
+  } else if (hunk.kind === 'join') {
+    const p = out[idx(hunk.paraId)];
+    if (p) p.text = p.text.slice(0, hunk.curStart) + p.text.slice(hunk.curEnd);
+    const back = base(hunk.removedId) || { id: hunk.removedId, type: hunk.removedType || 'body', text: hunk.text };
+    out.splice(idx(hunk.paraId) + 1, 0, { ...back });
+  } else if (hunk.kind === 'split') {
+    const i = idx(hunk.paraId);
+    const n = out[idx(hunk.newId)];
+    if (i >= 0 && n) {
+      const lead = (hunk.del.match(/^\s*/) || [''])[0] || (out[i].text && n.text ? ' ' : '');
+      out[i].text = out[i].text + lead + n.text;
+      out = out.filter((p) => p.id !== hunk.newId);
+    }
+  } else if (hunk.kind === 'move') {
+    const para = out[idx(hunk.paraId)];
+    out = out.filter((p) => p.id !== hunk.paraId);
+    placeAfterBasePredecessor(para);
+  } else if (hunk.kind === 'format') {
+    const p = out[idx(hunk.paraId)];
+    if (p) p.type = hunk.from;
   }
   return out;
 }

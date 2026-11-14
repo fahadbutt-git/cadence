@@ -20,8 +20,19 @@ import { checkParagraphs } from '../domains/language/grammarService.js';
 import { generateEditorialRevision, generateReview, generateAlternatives } from '../domains/editorial/editorialService.js';
 import { findSynonyms } from '../domains/language/thesaurusService.js';
 
-const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 25 * 1024 * 1024 } });
-const fileSafe = (s = 'Document') => String(s).replace(/[^\w .-]+/g, '').trim().replace(/\s+/g, '_') || 'Document';
+const upload = multer({ dest: UPLOADS_DIR, limits: { fileSize: 25 * 1024 * 1024 }, defParamCharset: 'utf8' });
+/** File name for a download: keeps letters in any language, drops path and control characters, stays short. */
+const fileSafe = (s = 'Document') => String(s).normalize('NFC').replace(/[\\/:*?"<>|\u0000-\u001f]+/g, '').replace(/^[.\s]+/, '').trim().replace(/\s+/g, '_').slice(0, 120) || 'Document';
+const disposition = (name, ext) => {
+  const ascii = name.replace(/[^\w.-]+/g, '') || 'Document';
+  return `attachment; filename="${ascii}.${ext}"; filename*=UTF-8''${encodeURIComponent(`${name}.${ext}`)}`;
+};
+// Multer reports a file over the size limit as an error; turn it into a plain message.
+const uploadOne = (req, res, next) => upload.single('file')(req, res, (err) => {
+  if (!err) return next();
+  res.status(err.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'That file is over 25 MB. Split it into smaller files and import them one at a time.' : 'The file could not be uploaded.' });
+});
+const str = (v, max = 200000) => (typeof v === 'string' ? v.slice(0, max) : v == null ? '' : String(v).slice(0, max));
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => {
   console.error(err);
   res.status(err.status || 500).json({ error: err.message || 'Request failed' });
@@ -33,18 +44,21 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
   router.get('/health', (req, res) => res.json({ ok: true }));
 
   router.get('/config', (req, res) => res.json(publicConfig(getConfig())));
-  router.post('/config', (req, res) => res.json(publicConfig(saveConfig(req.body || {}))));
+  router.post('/config', (req, res) => {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) return res.status(400).json({ error: 'Send settings as a JSON object' });
+    res.json(publicConfig(saveConfig(req.body)));
+  });
 
   router.get('/documents', (req, res) => res.json({ documents: listDocuments() }));
 
   router.get('/documents/:id', (req, res) => {
     const doc = getDocumentById(req.params.id);
     if (!doc) return res.status(404).json({ error: 'Document not found' });
-    saveConfig({ lastOpenedDocId: doc.id });
+    if (getConfig().lastOpenedDocId !== doc.id) saveConfig({ lastOpenedDocId: doc.id });
     res.json(doc);
   });
 
-  router.post('/documents', (req, res) => res.json(upsertDocument(req.body || {})));
+  router.post('/documents', wrap(async (req, res) => res.json(upsertDocument(req.body || {}))));
 
   router.post('/documents/:id/bookmark', (req, res) => {
     const bookmark = updateBookmark(req.params.id, req.body || {});
@@ -62,7 +76,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     res.json(saveSnapshot(doc, req.body?.reason || 'Checkpoint'));
   });
 
-  router.post('/import', upload.single('file'), wrap(async (req, res) => {
+  router.post('/import', uploadOne, wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
       res.json(await importDocumentFromFile(req.file.path, req.file.originalname));
@@ -71,7 +85,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     }
   }));
   // Old path kept so older builds keep working.
-  router.post('/import-docx', upload.single('file'), wrap(async (req, res) => {
+  router.post('/import-docx', uploadOne, wrap(async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     try {
       res.json(await importDocumentFromFile(req.file.path, req.file.originalname));
@@ -88,7 +102,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     const name = fileSafe(doc.title);
     if (format === 'md') {
       res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-      res.setHeader('Content-Disposition', `attachment; filename="${name}.md"`);
+      res.setHeader('Content-Disposition', disposition(name, 'md'));
       return res.send(documentAsMarkdown(doc, { includeComments: req.query.comments !== '0' }));
     }
     if (format === 'mp3') {
@@ -99,7 +113,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
         pronunciations: cfg.pronunciations,
       });
       res.setHeader('Content-Type', 'audio/mpeg');
-      res.setHeader('Content-Disposition', `attachment; filename="${name}.mp3"`);
+      res.setHeader('Content-Disposition', disposition(name, 'mp3'));
       return res.send(audio);
     }
     const buffer = await generateCleanDocxBuffer({
@@ -113,7 +127,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
       changesDate: doc.tracking?.startedAt,
     });
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-    res.setHeader('Content-Disposition', `attachment; filename="${name}.docx"`);
+    res.setHeader('Content-Disposition', disposition(name, 'docx'));
     res.send(buffer);
   }));
 
@@ -143,7 +157,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
     const b = req.body || {};
     // Offline proofreading: apply the local grammar checker's first suggestion for each correctness issue.
     if (b.action === 'proofread' && !cfg.apiKey) {
-      const target = String(b.targetText || '');
+      const target = str(b.targetText, 20000);
       const fixable = new Set(['Spelling', 'Typo', 'Grammar', 'Agreement', 'Repetition', 'BoundaryError', 'Capitalization', 'Punctuation', 'Miscellaneous', 'Usage', 'WordChoice']);
       const issues = (await grammar([target], { userDictionary: cfg.dictionary || [] }))
         .filter((i) => fixable.has(i.kind) && i.suggestions.length)
@@ -165,31 +179,34 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
         apiKey: cfg.apiKey,
         model: cfg.textModel,
         action: b.action,
-        targetText: b.targetText || '',
-        contextText: b.contextText || '',
-        instruction: b.instruction || '',
+        targetText: str(b.targetText, 20000),
+        contextText: str(b.contextText, 20000),
+        instruction: str(b.instruction, 2000),
         style: b.style || 'narrative',
       })
     );
   }));
 
   router.post('/grammar', wrap(async (req, res) => {
-    const paragraphs = Array.isArray(req.body?.paragraphs) ? req.body.paragraphs.map((t) => String(t ?? '')) : [];
+    const paragraphs = Array.isArray(req.body?.paragraphs) ? req.body.paragraphs.slice(0, 300).map((t) => (typeof t === 'string' ? t : String(t ?? '')).slice(0, 50000)) : [];
     res.json({ issues: await grammar(paragraphs, { userDictionary: getConfig().dictionary || [] }) });
   }));
 
   // Personal dictionary: add or remove a word.
   router.post('/dictionary', (req, res) => {
-    const word = String(req.body?.word || '').trim();
+    const word = str(req.body?.word, 100).trim();
     const cfg = getConfig();
     const set = new Set(cfg.dictionary || []);
+    if (word.length > 60) return res.status(400).json({ error: 'Words in the dictionary can be up to 60 characters.' });
+    if (word && !req.body?.remove && !set.has(word) && set.size >= 5000) return res.status(400).json({ error: 'The dictionary is full (5,000 words). Remove some words first.' });
     if (word) req.body?.remove ? set.delete(word) : set.add(word);
     res.json(publicConfig(saveConfig({ dictionary: [...set].sort((a, b) => a.localeCompare(b)) })));
   });
 
   router.post('/review', wrap(async (req, res) => {
     const cfg = getConfig();
-    const paragraphs = (req.body?.paragraphs || []).map((p) => ({ type: p.type === 'heading' ? 'heading' : 'body', text: String(p.text || '') }));
+    const list = Array.isArray(req.body?.paragraphs) ? req.body.paragraphs : [];
+    const paragraphs = list.filter((p) => p && typeof p === 'object').slice(0, 5000).map((p) => ({ type: p.type === 'heading' ? 'heading' : 'body', text: str(p.text, 50000) }));
     res.json(await reviewer({ apiKey: cfg.apiKey, model: cfg.textModel, paragraphs, style: req.body?.style || 'narrative' }));
   }));
 
@@ -202,7 +219,7 @@ export function createApiRouter({ tts = synthesizeSpeech, editor = generateEdito
   router.post('/alternatives', wrap(async (req, res) => {
     const cfg = getConfig();
     const b = req.body || {};
-    res.json(await alternatives({ apiKey: cfg.apiKey, model: cfg.textModel, targetText: String(b.targetText || ''), contextText: String(b.contextText || ''), style: b.style || 'narrative' }));
+    res.json(await alternatives({ apiKey: cfg.apiKey, model: cfg.textModel, targetText: str(b.targetText, 20000), contextText: str(b.contextText, 20000), style: b.style || 'narrative' }));
   }));
 
   return router;

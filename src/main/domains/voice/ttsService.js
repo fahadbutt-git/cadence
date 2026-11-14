@@ -31,15 +31,24 @@ export function escapeForSsml(text = '') {
     .replace(/'/g, '&apos;');
 }
 
-// Apply the user's pronunciation list (whole-word, case-insensitive).
+// Apply the user's pronunciation list (whole-word, case-insensitive). Word edges are checked with Unicode
+// letters, so entries such as µm, ≥ or % work too.
 export function applyPronunciations(text = '', rules = []) {
   let out = String(text);
   for (const rule of rules || []) {
     if (!rule?.from || !rule.to) continue;
-    const pat = new RegExp(`\\b${rule.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+    const body = rule.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pre = /^[\p{L}\p{N}]/u.test(rule.from) ? '(?<![\\p{L}\\p{N}])' : '';
+    const post = /[\p{L}\p{N}]$/u.test(rule.from) ? '(?![\\p{L}\\p{N}])' : '';
+    const pat = new RegExp(`${pre}${body}${post}`, 'giu');
     out = out.replace(pat, rule.to);
   }
   return out;
+}
+
+/** Citation numbers are not read aloud: superscripts (excluded²⁶) and bracketed numbers ([12], [3,4]). */
+export function stripCitations(text = '') {
+  return String(text).replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹⁻,]*[⁰¹²³⁴⁵⁶⁷⁸⁹]+/g, '').replace(/\s*\[\d+(?:\s*[,–-]\s*\d+)*\]/g, '');
 }
 
 export async function synthesizeWithStudioNeural(text, voiceId = DEFAULT_VOICE) {
@@ -113,7 +122,7 @@ export async function synthesizeSpeech({
   pronunciations = [],
   engines = { neural: synthesizeWithStudioNeural, gemini: synthesizeWithGemini },
 }) {
-  const clean = applyPronunciations((text || '').trim(), pronunciations);
+  const clean = applyPronunciations(stripCitations(text || '').trim(), pronunciations);
   if (!clean) throw new Error('Text is empty');
 
   if (GEMINI_VOICE_IDS.includes(voice)) {
@@ -157,7 +166,7 @@ export function chunkForSynthesis(paragraphs = [], maxChars = 2500) {
 
 /** Whole-document MP3 (neural voices produce MP3 frames that can be concatenated). */
 export async function synthesizeDocumentMp3({ paragraphs = [], voice, pronunciations = [], engine = synthesizeWithStudioNeural }) {
-  const chunks = chunkForSynthesis(paragraphs.map((p) => applyPronunciations(p, pronunciations)));
+  const chunks = chunkForSynthesis(paragraphs.map((p) => applyPronunciations(stripCitations(p), pronunciations)));
   if (!chunks.length) throw new Error('Document is empty');
   const buffers = [];
   for (const chunk of chunks) {

@@ -343,7 +343,7 @@ test('HTTP API: config, documents, edit, tts, export and import', async () => {
     const docx = await fetch(`${base}/documents/${created.id}/export?format=docx`);
     assert.match(docx.headers.get('content-disposition'), /HTTP_doc\.docx/);
     const md = await (await fetch(`${base}/documents/${created.id}/export?format=md`)).text();
-    assert.equal(md, 'We utilized it.\n');
+    assert.equal(md, '# HTTP doc\n\nWe utilized it.\n');
 
     const fd = new FormData();
     fd.append('file', new Blob(['# Imported\n\nHello there.']), 'notes.md');
@@ -486,4 +486,104 @@ test('HTTP API: synonyms, alternatives, Word import with comments, tracked expor
   } finally {
     server.close();
   }
+});
+
+// ---------- 3.5: fixes from the user testing round ----------
+
+test('joins, splits, moves and heading changes are single tracked changes that accept and reject cleanly', () => {
+  const B = [{ id: 'a', type: 'body', text: 'One two.' }, { id: 'b', type: 'body', text: 'Three four.' }, { id: 'c', type: 'body', text: 'Five six.' }];
+  const cases = {
+    join: [{ id: 'a', type: 'body', text: 'One two.Three four.' }, { id: 'c', type: 'body', text: 'Five six.' }],
+    split: [{ id: 'a', type: 'body', text: 'One' }, { id: 'n', type: 'body', text: 'two.' }, B[1], B[2]],
+    move: [B[2], B[0], B[1]],
+    format: [{ ...B[0], type: 'heading' }, B[1], B[2]],
+  };
+  for (const [kind, cur] of Object.entries(cases)) {
+    const r = text.trackChanges(B, cur);
+    assert.deepEqual(r.hunks.map((h) => h.kind), [kind], kind);
+    assert.deepEqual(text.rejectHunkInCurrent(cur, r.hunks[0], B), B, `${kind} reject`);
+    assert.deepEqual(text.trackChanges(text.acceptHunkInBaseline(B, r.hunks[0], cur), cur).hunks, [], `${kind} accept`);
+  }
+});
+
+test('long paragraphs still diff word by word', () => {
+  const long = Array.from({ length: 150 }, (_, i) => `Sentence ${i} has some words.`).join(' ');
+  const r = text.trackChanges([{ id: 'x', text: long }], [{ id: 'x', text: `Notably, ${long} overall` }]);
+  assert.deepEqual(r.hunks.map((h) => h.ins), ['Notably, ', ' overall']);
+});
+
+test('Dr. does not end a sentence and academic text keeps its semicolons and ranges', () => {
+  assert.equal(text.sentenceRanges('Dr. Micieli showed me. Then I left.').length, 2);
+  const kinds = text.findFlags('(83 vs 90; P < .001) for 12–18 months. Patients were seen.', null, { style: 'academic' }).map((f) => f.kind);
+  assert.ok(!kinds.includes('semicolon') && !kinds.includes('dash') && !kinds.includes('passive'));
+  assert.ok(text.findFlags('It was done; then — again.').some((f) => f.kind === 'semicolon'));
+});
+
+test('voice: natural phrasings, numbers and echo cleanup', () => {
+  const t = (s) => voice.parseCommand(s);
+  assert.equal(t('continue please').type, 'resume');
+  assert.equal(t('can you repeat that').type, 'repeat');
+  assert.equal(t('scratch that').type, 'reject');
+  assert.deepEqual(t('go to paragraph twenty one'), { type: 'gotoParagraph', n: 21 });
+  assert.deepEqual(t('go to the last paragraph'), { type: 'gotoParagraph', n: -1 });
+  assert.equal(t('cut the last sentence').action, 'cut-ending');
+  assert.equal(t('does this make sense').type, 'ask');
+  assert.equal(t('uh').type, 'none');
+  assert.equal(t('blue').type, 'unknown');
+  assert.ok(voice.isBargeIn('accept', [], { reply: 'Say accept, read it, or reject.' }));
+  assert.ok(!voice.isBargeIn('Next', ['Next, I rotated through the clinic.']));
+  assert.ok(!voice.isBargeIn('uh huh', []));
+  assert.equal(voice.cleanTranscript('the clinic was busy tighten this', ['The clinic was busy that day.']), 'tighten this');
+  assert.equal(voice.cleanTranscript('tighten this sentence', ['You can tighten it, or this.']), 'tighten this sentence');
+});
+
+test('saves refuse stale versions and deleted documents, and ids are cleaned', () => {
+  const doc = repo.upsertDocument({ title: 'V', paragraphs: [{ id: 'a"><img>', text: 'x' }, { id: 'a"><img>', text: 'y' }] });
+  assert.match(doc.paragraphs[0].id, /^[\w-]+$/);
+  assert.notEqual(doc.paragraphs[0].id, doc.paragraphs[1].id);
+  const next = repo.upsertDocument({ id: doc.id, baseVersion: doc.version, paragraphs: doc.paragraphs });
+  assert.throws(() => repo.upsertDocument({ id: doc.id, baseVersion: doc.version, paragraphs: [] }), (e) => e.status === 409);
+  assert.equal(next.version, doc.version + 1);
+  repo.deleteDocument(doc.id);
+  assert.throws(() => repo.upsertDocument({ id: doc.id, baseVersion: next.version, paragraphs: [] }), (e) => e.status === 410);
+});
+
+test('imports: nested lists, superscript citations, reference lists and other encodings', () => {
+  const html = repo.paragraphsFromHtml('<ul><li>Calm<ul><li>Clear</li></ul></li></ul><p>excluded<sup>26</sup>.</p>').map((p) => p.text);
+  assert.deepEqual(html, ['Calm', 'Clear', 'excluded²⁶.']);
+  assert.deepEqual(repo.paragraphsFromText('# Refs\n1. Smith.\n2. Lee.\n#tag line').map((p) => p.text), ['Refs', '1. Smith.', '2. Lee. #tag line']);
+  const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Café', 'utf16le')]);
+  assert.equal(repo.decodeText(utf16), 'Café');
+  assert.equal(repo.decodeText(Buffer.from([0x43, 0x61, 0x66, 0xe9])), 'Café');
+});
+
+test('server only accepts requests from this computer', async () => {
+  const server = createApp({ grammar: async () => [] }).listen(0);
+  const port = server.address().port;
+  try {
+    const bad = await fetch(`http://127.0.0.1:${port}/api/documents`, { method: 'POST', headers: { Origin: 'http://evil.example', 'Content-Type': 'application/json' }, body: '{}' });
+    assert.equal(bad.status, 403);
+    const json = await fetch(`http://127.0.0.1:${port}/api/documents`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"paragraphs":"abc"}' });
+    assert.equal(json.status, 400);
+    assert.match((await json.json()).error, /list/);
+  } finally {
+    server.close();
+  }
+});
+
+test('grammar: hyphen parts, names and units are not flagged, offensive words are never suggested', async () => {
+  const { checkParagraphs } = await import('../src/main/domains/language/grammarService.js');
+  const issues = await checkParagraphs(['I trained in neuro-ophthalmology with Dr. Micieli. Thickness was 83 um on dorzolamide.', 'were excluded²⁶ here.']);
+  assert.deepEqual(issues.map((i) => i.text), []);
+});
+
+test('settings survive a damaged file and odd types', () => {
+  const file = path.join(TMP, 'cfg-test.json');
+  config.saveConfig({ reviewerName: 'Fahad', dictionary: ['Seva'] }, file);
+  fs.writeFileSync(file, '{"reviewerNa');
+  assert.equal(config.getConfig(file).reviewerName, 'Fahad'); // read from the backup
+  config.saveConfig({ apiKey: 12345, rate: null }, file);
+  const cfg = config.getConfig(file);
+  assert.equal(cfg.apiKey, '');
+  assert.equal(cfg.rate, 1);
 });

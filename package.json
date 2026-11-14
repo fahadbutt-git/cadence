@@ -1,6 +1,6 @@
 {
   "name": "voice-manuscript-studio",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Cadence: listen to your writing, edit by voice or selection, and review suggested changes inline.",
   "type": "module",
   "main": "server.js",

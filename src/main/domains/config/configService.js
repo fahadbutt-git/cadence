@@ -74,13 +74,24 @@ const WRITABLE_KEYS = Object.keys(getDefaultConfig());
 
 export function sanitizeConfigPatch(patch = {}) {
   const out = {};
+  if (!patch || typeof patch !== 'object') return out;
   for (const key of WRITABLE_KEYS) {
-    if (patch[key] === undefined) continue;
+    if (patch[key] === undefined || patch[key] === null && key !== 'lastOpenedDocId') continue;
     out[key] = patch[key];
   }
+  // Every key keeps the type the app expects; anything else is dropped.
+  for (const key of ['apiKey', 'textModel', 'ttsModel']) {
+    if (out[key] !== undefined) {
+      if (typeof out[key] === 'string') out[key] = out[key].trim().slice(0, 300);
+      else delete out[key];
+    }
+  }
+  if (out.showFlags !== undefined) out.showFlags = Boolean(out.showFlags);
+  if (out.lastOpenedDocId !== undefined) out.lastOpenedDocId = typeof out.lastOpenedDocId === 'string' ? out.lastOpenedDocId.replace(/[^\w-]/g, '').slice(0, 80) || null : null;
   if (out.rate !== undefined) {
     const r = Number(out.rate);
-    out.rate = Number.isFinite(r) ? Math.min(2, Math.max(0.5, r)) : 1;
+    if (Number.isFinite(r) && r > 0) out.rate = Math.min(2, Math.max(0.5, r));
+    else delete out.rate;
   }
   if (out.voiceId !== undefined && !VOICES.some((v) => v.id === out.voiceId)) {
     delete out.voiceId;
@@ -109,17 +120,24 @@ export function sanitizeConfigPatch(patch = {}) {
   return out;
 }
 
+function readSaved(file) {
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
 export function getConfig(configPath = CONFIG_FILE) {
   ensureDataDirectories();
   let cfg = getDefaultConfig();
+  cfg.unreadable = false;
   if (fs.existsSync(configPath)) {
+    let saved = null;
     try {
-      const saved = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-      cfg = { ...cfg, ...sanitizeConfigPatch(saved) };
-      if (saved.lastOpenedDocId) cfg.lastOpenedDocId = saved.lastOpenedDocId;
+      saved = readSaved(configPath);
     } catch (e) {
-      console.error('Could not read config, using defaults:', e.message);
+      // A damaged settings file: fall back to the last good copy rather than losing the dictionary and key.
+      try { saved = readSaved(`${configPath}.bak`); } catch (e2) { cfg.unreadable = true; }
+      console.error('Could not read config:', e.message);
     }
+    if (saved) cfg = { ...cfg, ...sanitizeConfigPatch(saved) };
   }
   if (!cfg.apiKey && process.env.GEMINI_API_KEY) cfg.apiKey = process.env.GEMINI_API_KEY;
   return cfg;
@@ -128,16 +146,26 @@ export function getConfig(configPath = CONFIG_FILE) {
 export function saveConfig(patch = {}, configPath = CONFIG_FILE) {
   ensureDataDirectories();
   const current = getConfig(configPath);
-  const merged = { ...current, ...sanitizeConfigPatch(patch) };
-  if (patch.lastOpenedDocId !== undefined) merged.lastOpenedDocId = patch.lastOpenedDocId;
-  fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), 'utf8');
+  const { unreadable, ...rest } = current;
+  const merged = { ...rest, ...sanitizeConfigPatch(patch) };
+  // Never overwrite a settings file that could not be read with defaults; keep a copy for the user to recover.
+  if (unreadable && fs.existsSync(configPath)) {
+    try { fs.copyFileSync(configPath, `${configPath}.damaged-${Date.now()}`); } catch (e) {}
+  }
+  // Write to a temporary file and rename, so a crash mid-write cannot leave a half-written file,
+  // and keep a backup copy to fall back on.
+  const body = JSON.stringify(merged, null, 2);
+  const tmp = `${configPath}.tmp`;
+  fs.writeFileSync(tmp, body, 'utf8');
+  fs.renameSync(tmp, configPath);
+  try { fs.writeFileSync(`${configPath}.bak`, body, 'utf8'); } catch (e) {}
   return merged;
 }
 
 // Never send the raw key to the browser.
 export function publicConfig(cfg = getConfig()) {
-  const { apiKey, ...rest } = cfg;
-  return { ...rest, hasApiKey: Boolean(apiKey && apiKey.trim().length > 10), voices: VOICES };
+  const { apiKey, unreadable, ...rest } = cfg;
+  return { ...rest, hasApiKey: Boolean(typeof apiKey === 'string' && apiKey.trim().length > 10), voices: VOICES };
 }
 
 export function getVoiceProfileSummary(profilePath = VOICE_PROFILE_PATH) {

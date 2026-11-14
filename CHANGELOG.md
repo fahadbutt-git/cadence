@@ -1,5 +1,60 @@
 # Changelog
 
+## 3.5.0
+
+Fixes from a testing round with six simulated users (a personal statement writer, a mentor reviewing in Word, a voice-first user, a researcher with a long manuscript, a keyboard-only user on a small screen, and an adversarial tester).
+
+Work is never lost
+- Saves carry a version. If the same document was changed in another window, Cadence asks before overwriting, and keeps the other text as a saved version. A save for a document deleted elsewhere offers to save it as a new one.
+- A slow save can no longer write one document's text into another.
+- Leaving a document, creating a new one or importing waits for every pending save, including text typed while a save was in flight. If saving is failing, Cadence stays put with a message.
+- Undo after pasting over a selection brings the selection back.
+- Settings are written safely with a backup, so a crash cannot wipe the dictionary, reviewer name or key.
+- Pasting text that ends in a line break (a paragraph copied from Word or email) works, and keeps the space before the pasted text.
+
+Track changes
+- Joining, splitting and moving paragraphs, and turning a paragraph into a heading, are each one change you can accept or reject.
+- Undo after Accept undoes the accept.
+- Comments on a deleted paragraph come back with the paragraph when the deletion is rejected, and follow text that is joined into another paragraph.
+- Long paragraphs are still compared word by word, and a one-word to two-word replacement is one change.
+- Word export: comments on deleted or joined paragraphs stay on their text, moved paragraphs, a deleted last paragraph, superscript citations, Letter page size, and comments keep their original author.
+
+Word and text import
+- A Word file's own tracked changes, including moves, are kept as tracked changes instead of being accepted silently, and paragraphs are paired by similarity so mixed accept and reject decisions come out right.
+- Comments keep their author and date, land on the right paragraph when text repeats, and on the right occurrence of a phrase.
+- Nested bullet points stay separate, superscript citations are kept, tables come in one row per line, and the Title style becomes a heading.
+- Markdown reference lists stay one reference per paragraph, emphasis markers are removed, and pasted Markdown headings become headings.
+- Text files in UTF-16 or Windows encodings, file names in any language, and clear messages for damaged or oversized files.
+
+Spelling, grammar and style
+- "neuro" in "neuro-ophthalmology" is no longer flagged, and offensive words are never offered as a fix.
+- Hundreds of ophthalmology, drug, statistics and reference-list words added. Names in mid-sentence, micrometres ("83 um"), number ranges and superscript citations are no longer flagged.
+- "Change all" only appears when the fix is a near miss, so a correct medical term is never replaced everywhere.
+- Ignoring a word lasts for the document, and removing a dictionary word takes effect at once.
+- Academic style no longer flags passive voice, semicolons in statistics and references, or dashes in number ranges.
+- "Dr." no longer ends a sentence when reading aloud or checking length.
+- Running editor feedback twice does not duplicate comments. A deleted comment can be brought back with Undo.
+- Offline Tighten no longer leaves a lower-case start or removes meaningful words.
+
+Talk and reading
+- Commands said while Cadence is talking (accept, continue, stop listening) are heard.
+- Cadence's own reading voice no longer interrupts it after a few sentences.
+- Turning Talk off mid-sentence no longer runs a half-heard phrase as an edit.
+- "Accept" applies the suggestion Cadence just described.
+- Many more natural phrasings ("continue please", "scratch that", "go to the last paragraph", "paragraph twenty one", "can you repeat that"), and short noise like "uh" is ignored.
+- "Cut the last sentence" works. Faster and slower keep reading. The end of the document is announced.
+- Citation numbers are not read aloud, and pronunciations work for symbols like µm and ≥.
+
+Keyboard, layout and accessibility
+- The Export menu opens above the page and works with the keyboard.
+- Talk is now Cmd+Shift+M (Option+M still works outside text, so you can type µ). On a Mac, Control shortcuts are left to text editing.
+- Space on a button or tab presses it instead of starting playback, and nothing fires behind an open dialog.
+- Typing while Cadence reads no longer scrambles the text.
+- Cmd+Enter in the comment box no longer accepts a suggestion elsewhere.
+- Messages stay readable in the top bar and never push buttons off screen. Talk stays available in narrow windows.
+- Focus returns to the text after closing find, pop-ups and the panel. View, Zoom In and Zoom Out in the Mac app.
+- Compare matches paragraphs by identity, and the shortcut lists are complete.
+
 ## 3.4.0
 
 - Side panel rebuilt. It sits beside the page and never covers it. Drag its left edge to make it wider or narrower (double-click to reset). In a narrow window it fills the window while open, and picking an item takes you back to the text.

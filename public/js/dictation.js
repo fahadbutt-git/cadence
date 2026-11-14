@@ -28,6 +28,7 @@ export class Dictation extends EventTarget {
       return;
     }
     this.continuous = continuous;
+    this.discard = false;
     this.buffer = '';
     this.listening = true;
     this.emit('state', true);
@@ -77,6 +78,10 @@ export class Dictation extends EventTarget {
   stop() {
     if (!this.listening) return;
     if (this.native) {
+      // Stopping on purpose: whatever the recogniser still sends is not a new instruction.
+      this.continuous = false;
+      this.buffer = '';
+      this.discard = true;
       this.native.postMessage({ cmd: 'stop' });
     } else if (this.rec) {
       const wasContinuous = this.continuous;
@@ -91,6 +96,7 @@ export class Dictation extends EventTarget {
   }
 
   handle(evt = {}) {
+    if (this.discard && (evt.type === 'partial' || evt.type === 'final')) { if (evt.type === 'final') this.finish(); return; }
     if (evt.type === 'partial') this.emit('partial', evt.text || '');
     else if (evt.type === 'final') {
       if (this.continuous) this.emit('final', (evt.text || '').trim());
@@ -101,6 +107,7 @@ export class Dictation extends EventTarget {
 
   finish() {
     if (!this.listening) return;
+    this.discard = false;
     this.listening = false;
     this.rec = null;
     this.emit('state', false);

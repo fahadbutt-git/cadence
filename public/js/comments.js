@@ -32,18 +32,22 @@ export class Comments extends EventTarget {
     return this.items.filter((c) => !c.resolved);
   }
 
-  add({ paraId = null, quote = '', text }) {
+  add({ paraId = null, quote = '', at, text, author = '' }) {
     const c = { id: uid(), paraId, quote: paraId ? quote : '', text: text.trim(), createdAt: new Date().toISOString(), resolved: false };
+    if (paraId && quote && Number.isInteger(at)) c.at = at;
+    if (author) c.author = author;
     if (!c.text) return null;
     this.items.push(c);
     this.changed();
     return c;
   }
 
+  /** Add several comments, skipping any that are already open with the same place and wording. */
   addMany(list = []) {
     let n = 0;
     for (const c of list) {
       if (!c.text?.trim()) continue;
+      if (this.items.some((x) => !x.resolved && (x.paraId || null) === (c.paraId || null) && x.text === c.text.trim() && (x.quote || '') === (c.paraId ? c.quote || '' : ''))) continue;
       this.items.push({ id: uid(), paraId: c.paraId || null, quote: c.paraId ? c.quote || '' : '', text: c.text.trim(), createdAt: new Date().toISOString(), resolved: false });
       n++;
     }
@@ -59,8 +63,36 @@ export class Comments extends EventTarget {
   }
 
   remove(id) {
-    this.items = this.items.filter((x) => x.id !== id);
+    const at = this.items.findIndex((x) => x.id === id);
+    if (at < 0) return;
+    this.lastRemoved = { item: this.items[at], at };
+    this.items.splice(at, 1);
     this.changed();
+    this.dispatchEvent(new CustomEvent('removed', { detail: this.lastRemoved.item }));
+  }
+
+  undoRemove() {
+    if (!this.lastRemoved) return false;
+    this.items.splice(this.lastRemoved.at, 0, this.lastRemoved.item);
+    this.lastRemoved = null;
+    this.changed();
+    return true;
+  }
+
+  /**
+   * Keep comments attached when their paragraph is joined into another one: if the paragraph is gone and its
+   * quote now sits in a different paragraph, point the comment there. keepIds are paragraphs that may come back.
+   */
+  repair(keepIds = new Set()) {
+    const paras = this.editor.paragraphs;
+    const ids = new Set(paras.map((p) => p.id));
+    let changed = false;
+    for (const c of this.items) {
+      if (!c.paraId || ids.has(c.paraId) || keepIds.has(c.paraId) || !c.quote) continue;
+      const hit = paras.find((p) => p.text.includes(c.quote));
+      if (hit) { c.paraId = hit.id; c.at = hit.text.indexOf(c.quote); changed = true; }
+    }
+    if (changed) this.changed();
   }
 
   changed() {
@@ -80,7 +112,8 @@ export class Comments extends EventTarget {
     const index = this.editor.paragraphs.findIndex((p) => p.id === c.paraId);
     if (index < 0) return null;
     const text = this.editor.paragraphs[index].text;
-    const at = c.quote ? text.indexOf(c.quote) : -1;
+    // Prefer the stored position, so a comment on the second "the" stays on the second one.
+    const at = !c.quote ? -1 : Number.isInteger(c.at) && text.slice(c.at, c.at + c.quote.length) === c.quote ? c.at : text.indexOf(c.quote);
     return at >= 0 ? { index, start: at, end: at + c.quote.length } : { index, start: 0, end: 0 };
   }
 
@@ -96,8 +129,8 @@ export class Comments extends EventTarget {
       .map((c) => {
         const idx = c.paraId ? order.get(c.paraId) : undefined;
         const where = !c.paraId ? 'Whole document' : idx === undefined ? 'Paragraph removed' : `Paragraph ${idx + 1}`;
-        return `<li class="comment-item${c.resolved ? ' resolved' : ''}${c.paraId && c.paraId === this.activeParaId ? ' active' : ''}" data-id="${c.id}" data-para="${c.paraId || ''}">
-          <div class="where" data-act="show" title="Show in the text">${where}</div>
+        return `<li class="comment-item${c.resolved ? ' resolved' : ''}${c.paraId && c.paraId === this.activeParaId ? ' active' : ''}" data-id="${escapeHtml(c.id)}" data-para="${escapeHtml(c.paraId || '')}">
+          <div class="where" data-act="show" title="Show in the text">${where}${c.author ? ` <span class="author">${escapeHtml(c.author)}</span>` : ''}</div>
           ${c.quote ? `<div class="quote">${escapeHtml(c.quote)}</div>` : ''}
           <div class="body">${escapeHtml(c.text)}</div>
           <div class="row">

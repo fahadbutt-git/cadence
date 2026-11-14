@@ -3,7 +3,7 @@
 // dictated or accepted from a suggestion, shows as a change that can be accepted or rejected.
 // Accepting moves the baseline forward. Rejecting puts the baseline wording back in the text.
 
-import { trackChanges, acceptHunkInBaseline, escapeHtml } from './core/textUtils.js';
+import { trackChanges, acceptHunkInBaseline, rejectHunkInCurrent, escapeHtml } from './core/textUtils.js';
 
 const clone = (list) => list.map((p) => ({ id: p.id, type: p.type, text: p.text }));
 
@@ -100,6 +100,7 @@ export class Tracker extends EventTarget {
     const h = this.find(id);
     if (!h) return false;
     const at = this.hunks.indexOf(h);
+    this.editor.pushUndo(); // so Cmd+Z undoes the accept itself
     this.baseline = acceptHunkInBaseline(this.baseline, h, this.editor.paragraphs);
     this.refresh();
     this.focusIndex(at);
@@ -111,20 +112,8 @@ export class Tracker extends EventTarget {
     const h = this.find(id);
     if (!h) return false;
     const at = this.hunks.indexOf(h);
-    const paras = this.editor.paragraphs;
-    if (h.kind === 'text') {
-      const index = paras.findIndex((p) => p.id === h.paraId);
-      if (index < 0) return false;
-      this.editor.replaceSpan(index, h.curStart, h.curEnd, h.del);
-    } else if (h.kind === 'para-ins') {
-      this.editor.setParagraphs(paras.filter((p) => p.id !== h.paraId));
-    } else if (h.kind === 'para-del') {
-      const back = this.baseline.find((p) => p.id === h.paraId);
-      const out = clone(paras);
-      const at = h.afterId ? out.findIndex((p) => p.id === h.afterId) + 1 : 0;
-      out.splice(at, 0, { ...back });
-      this.editor.setParagraphs(out);
-    }
+    const caret = this.editor.getCaret();
+    this.editor.setParagraphs(rejectHunkInCurrent(this.editor.paragraphs, h, this.baseline), { caret });
     this.refresh();
     this.focusIndex(at);
     this.dispatchEvent(new Event('change'));
@@ -141,6 +130,7 @@ export class Tracker extends EventTarget {
   acceptAll() {
     const n = this.hunks.length;
     if (!n) return 0;
+    this.editor.pushUndo();
     this.baseline = clone(this.editor.paragraphs);
     this.activeId = null;
     this.changed();
@@ -164,7 +154,7 @@ export class Tracker extends EventTarget {
       const c = this.editor.getCaret();
       const pos = (h) => {
         if (h.kind === 'para-del') return h.afterId ? [this.editor.paragraphs.findIndex((p) => p.id === h.afterId), Infinity] : [0, 0];
-        return [this.editor.paragraphs.findIndex((p) => p.id === h.paraId), h.curStart ?? 0];
+        return [this.editor.paragraphs.findIndex((p) => p.id === h.paraId), h.kind === 'text' || h.kind === 'join' || h.kind === 'split' ? h.curStart ?? 0 : 0];
       };
       if (c) {
         const after = this.hunks.findIndex((h) => { const [pi, off] = pos(h); return pi > c.index || (pi === c.index && off >= c.offset); });
@@ -186,12 +176,12 @@ export class Tracker extends EventTarget {
     const h = this.find(id);
     if (!h) return;
     if (this.view === 'all') {
-      this.markupEl.querySelector(`[data-h="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      this.markupEl.querySelector(`[data-h="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
     } else if (reveal) {
       const index = this.editor.paragraphs.findIndex((p) => p.id === (h.kind === 'para-del' ? h.afterId : h.paraId));
       if (index >= 0) {
-        if (h.kind === 'text' && h.curEnd > h.curStart) this.editor.selectRange(index, h.curStart, h.curEnd);
-        else this.editor.setCaret(index, h.kind === 'text' ? h.curStart : 0);
+        if ((h.kind === 'text' || h.kind === 'join') && h.curEnd > h.curStart) this.editor.selectRange(index, h.curStart, h.curEnd);
+        else this.editor.setCaret(index, h.kind === 'text' || h.kind === 'split' ? h.curStart : 0);
       }
     }
     this.dispatchEvent(new CustomEvent('select', { detail: h }));
@@ -218,7 +208,8 @@ export class Tracker extends EventTarget {
       for (const h of hunks) {
         const id = h.kind === 'para-del' ? h.afterId : h.paraId;
         if (id && paraIndex.has(id)) marks[id] = marks[id] || (h.kind === 'para-ins' ? 'inserted' : 'changed');
-        if (h.kind !== 'para-del' && h.curEnd > h.curStart) ins.push({ index: paraIndex.get(h.paraId), start: h.curStart, end: h.curEnd });
+        if (h.kind === 'split' && paraIndex.has(h.newId)) marks[h.newId] = 'changed';
+        if (['text', 'para-ins', 'join'].includes(h.kind) && h.curEnd > h.curStart) ins.push({ index: paraIndex.get(h.paraId), start: h.curStart, end: h.curEnd });
       }
     }
     this.editor.setParaMarks(marks);
@@ -232,18 +223,23 @@ export class Tracker extends EventTarget {
     this.emptyEl.textContent = this.on
       ? 'Tracking is on. Edits you make from now on show here to accept or reject.'
       : 'Turn on Track changes to record your edits. Each one can then be accepted or rejected, and Word exports show them as tracked changes your reader can review.';
+    const hadFocus = this.listEl.contains(document.activeElement);
     this.listEl.innerHTML = hunks
       .map((h) => {
         const where = this.describeWhere(h, paraIndex);
         const body =
-          h.kind === 'para-del'
+          h.kind === 'move' || h.kind === 'format' || h.kind === 'join' || h.kind === 'split'
+            ? `<span class="change-plain">${escapeHtml(clip(h.kind === 'join' || h.kind === 'split' ? h.text : h.ins, 160))}</span>`
+            : h.kind === 'para-del'
             ? `<del>${escapeHtml(clip(h.del, 220))}</del>`
             : h.kind === 'para-ins'
               ? `<ins>${escapeHtml(clip(h.ins, 220))}</ins>`
               : `${h.del ? `<del>${escapeHtml(clip(h.del, 160))}</del>` : ''}${h.del && h.ins ? ' ' : ''}${h.ins ? `<ins>${escapeHtml(clip(h.ins, 160))}</ins>` : ''}`;
-        return `<li class="change${h.id === this.activeId ? ' active' : ''}" data-hunk="${escapeHtml(h.id)}" tabindex="0"><div class="change-text">${body}</div><div class="change-foot"><span class="where">${where}</span><span class="row"><button class="btn subtle" data-hact="reject" type="button">Reject</button><button class="btn" data-hact="accept" type="button">Accept</button></span></div></li>`;
+        return `<li class="change${h.id === this.activeId ? ' active' : ''}" data-hunk="${escapeHtml(h.id)}" tabindex="0"><div class="change-text">${body}</div><div class="change-foot"><span class="where">${where}</span><span class="row"><button class="btn" data-hact="accept" type="button">Accept</button><button class="btn subtle" data-hact="reject" type="button">Reject</button></span></div></li>`;
       })
       .join('');
+    // Keep keyboard focus in the list after it is rebuilt.
+    if (hadFocus) (this.listEl.querySelector('.change.active') || this.listEl.querySelector('.change'))?.focus({ preventScroll: true });
 
     this.markupEl.hidden = this.view !== 'all';
     if (this.view === 'all') this.markupEl.innerHTML = this.markupHtml();
@@ -253,6 +249,10 @@ export class Tracker extends EventTarget {
     const n = (id) => (paraIndex.has(id) ? paraIndex.get(id) + 1 : null);
     if (h.kind === 'para-del') return h.afterId ? `Paragraph removed after paragraph ${n(h.afterId)}` : 'Paragraph removed at the start';
     if (h.kind === 'para-ins') return `New paragraph ${n(h.paraId)}`;
+    if (h.kind === 'join') return `Paragraph joined to paragraph ${n(h.paraId)}`;
+    if (h.kind === 'split') return `Paragraph ${n(h.paraId)} split in two`;
+    if (h.kind === 'move') return `Paragraph moved to position ${n(h.paraId)}`;
+    if (h.kind === 'format') return `Paragraph ${n(h.paraId)} changed to ${h.to === 'heading' ? 'a heading' : 'body text'}`;
     const verb = h.del && h.ins ? 'Replaced' : h.ins ? 'Added' : 'Deleted';
     return `${verb} in paragraph ${n(h.paraId)}`;
   }
@@ -266,19 +266,24 @@ export class Tracker extends EventTarget {
     const delBlock = (afterId) =>
       deleted
         .filter((d) => d.afterId === afterId && d.text.trim())
-        .map((d) => `<div class="para${d.type === 'heading' ? ' heading' : ''}"><del data-h="del:${escapeHtml(d.id)}"${cls(`del:${d.id}`)}>${escapeHtml(d.text)}</del></div>`)
+        .map((d) => {
+          const hid = d.moved ? `mv:${d.id}` : this.hunks.some((h) => h.id === `join:${d.id}`) ? `join:${d.id}` : `del:${d.id}`;
+          return `<div class="para${d.type === 'heading' ? ' heading' : ''}${d.moved ? ' moved-from' : ''}"><del data-h="${escapeHtml(hid)}"${cls(hid)}>${escapeHtml(d.text)}</del></div>`;
+        })
         .join('');
     let html = delBlock(null);
     for (const p of paragraphs) {
       const heading = typeOf.get(p.id) === 'heading' ? ' heading' : '';
       let inner = '';
-      if (p.status === 'inserted') {
-        inner = p.segments.length ? `<ins data-h="ins:${escapeHtml(p.id)}"${cls(`ins:${p.id}`)}>${escapeHtml(p.segments[0].text)}</ins>` : '';
+      const splitHunk = this.hunks.find((h) => h.kind === 'split' && h.newId === p.id);
+      if (p.status === 'inserted' || p.moved) {
+        const hid = p.moved ? `mv:${p.id}` : splitHunk ? splitHunk.id : `ins:${p.id}`;
+        inner = p.text || p.segments.length ? `<ins data-h="${escapeHtml(hid)}"${cls(hid)}>${escapeHtml(this.editor.paragraphs.find((x) => x.id === p.id)?.text || '')}</ins>` : '';
       } else {
         let hid = null;
         for (const s of p.segments) {
           if (s.type === 'same') { hid = null; inner += escapeHtml(s.text); continue; }
-          if (!hid) hid = `${p.id}:${s.baseStart}:${s.curStart}`;
+          if (!hid) hid = this.hunks.find((h) => (h.kind === 'join' || h.kind === 'split') && h.paraId === p.id && h.curStart === s.curStart)?.id || `${p.id}:${s.baseStart}:${s.curStart}`;
           inner += `<${s.type} data-h="${escapeHtml(hid)}"${cls(hid)}>${escapeHtml(s.text)}</${s.type}>`;
         }
       }

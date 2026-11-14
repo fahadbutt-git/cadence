@@ -16,6 +16,7 @@
         <img src="/icon.svg" alt="" width="24" height="24" />
         <span>Cadence</span>
       </div>
+      <span id="libraryStatus" class="status small" role="status" aria-live="polite" hidden></span>
       <div class="bar-actions">
         <button class="btn" data-cmd="import" type="button">Import</button>
         <button class="btn primary" data-cmd="new" type="button">New document</button>
@@ -41,6 +42,7 @@
         <input id="librarySearch" class="search" type="search" placeholder="Filter by title" aria-label="Filter documents" />
       </div>
       <ul id="docList" class="doc-list" aria-label="Documents"></ul>
+      <p id="libraryNoMatch" class="empty" hidden>No documents match your search.</p>
       <div id="libraryEmpty" class="empty" hidden>
         <p>No documents yet. Import a Word file or start a new document.</p>
       </div>
@@ -64,11 +66,11 @@
         <div class="menu-wrap">
           <button class="btn" id="exportBtn" type="button" aria-haspopup="menu" aria-expanded="false">Export</button>
           <div class="menu" id="exportMenu" role="menu" hidden>
-            <a role="menuitem" data-export="docx">Word document with comments and tracked changes (.docx)</a>
-            <a role="menuitem" data-export="docx-final">Word document with comments, changes accepted (.docx)</a>
-            <a role="menuitem" data-export="docx-clean">Word document, clean copy (.docx)</a>
-            <a role="menuitem" data-export="md">Markdown (.md)</a>
-            <a role="menuitem" data-export="mp3">Audio of whole document (.mp3)</a>
+            <button type="button" role="menuitem" tabindex="-1" data-export="docx">Word document with comments and tracked changes (.docx)</button>
+            <button type="button" role="menuitem" tabindex="-1" data-export="docx-final">Word document with comments, changes accepted (.docx)</button>
+            <button type="button" role="menuitem" tabindex="-1" data-export="docx-clean">Word document, clean copy (.docx)</button>
+            <button type="button" role="menuitem" tabindex="-1" data-export="md">Markdown (.md)</button>
+            <button type="button" role="menuitem" tabindex="-1" data-export="mp3">Audio of whole document (.mp3)</button>
           </div>
         </div>
         <button class="btn track-btn" id="trackToggle" type="button" aria-pressed="false" title="Track changes: record edits so each one can be accepted or rejected (Cmd+Shift+E)">Track changes</button>
@@ -123,7 +125,7 @@
           <form id="askForm" class="ask">
             <textarea id="askInput" rows="3" placeholder="Tell Cadence what to change, or ask a question. Example: make the ending more concrete" aria-label="Instruction"></textarea>
             <div class="row between">
-              <button id="micBtn" class="btn talk" type="button" aria-pressed="false" title="Talk to Cadence (Option+M)">
+              <button id="micBtn" class="btn talk" type="button" aria-pressed="false" title="Talk to Cadence (Cmd+Shift+M)">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="10" rx="3"/><path d="M4.5 10a5.5 5.5 0 0 0 11 0M10 15.5V18"/></svg>
                 <span>Talk</span>
               </button>
@@ -254,7 +256,7 @@
         <div id="strip" class="strip" role="slider" aria-label="Sentences in this document" tabindex="0"></div>
       </div>
       <div class="voice-controls">
-        <button class="btn talk" id="talkBtn" type="button" aria-pressed="false" title="Talk to Cadence while it reads (Option+M)">
+        <button class="btn talk" id="talkBtn" type="button" aria-pressed="false" title="Talk to Cadence while it reads (Cmd+Shift+M)">
           <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="10" rx="3"/><path d="M4.5 10a5.5 5.5 0 0 0 11 0M10 15.5V18"/></svg>
           <span>Talk</span>
         </button>
@@ -344,9 +346,10 @@
       <details class="shortcuts">
         <summary>Things you can say while Talk is on</summary>
         <dl>
-          <dt>Reading</dt><dd>continue, pause, back, next, repeat, start over, go to paragraph three, next paragraph, faster, slower</dd>
-          <dt>Editing</dt><dd>tighten this sentence, clean up this paragraph, cut the ending, replace pivotal with important, or any instruction in your own words</dd>
+          <dt>Reading</dt><dd>continue, pause, back, next, repeat, start over, go to paragraph three, last paragraph, next paragraph, faster, slower</dd>
+          <dt>Editing</dt><dd>tighten this sentence, clean up this paragraph, cut the last sentence, replace pivotal with important, or any instruction in your own words</dd>
           <dt>Deciding</dt><dd>accept, reject, read it, undo</dd>
+          <dt>Tracked changes</dt><dd>turn on track changes, next change, accept, reject, accept all changes, stop tracking</dd>
           <dt>Comments</dt><dd>comment, followed by your note, for this paragraph. General comment, followed by your note, for the whole document</dd>
           <dt>Other</dt><dd>proofread this, what is flagged, save a version, help, stop listening</dd>
         </dl>
@@ -355,17 +358,24 @@
         <summary>Keyboard shortcuts</summary>
         <dl>
           <dt>Option+Space</dt><dd>Read from cursor or pause</dd>
-          <dt>Escape</dt><dd>Stop reading, close toolbar, turn Talk off</dd>
-          <dt>[ and ]</dt><dd>Previous or next sentence while reading</dd>
-          <dt>Option+M</dt><dd>Turn Talk on or off. While on, speak any time: it pauses, acts, and continues when you say continue</dd>
+          <dt>Escape</dt><dd>Stop reading, close a toolbar or pop-up</dd>
+          <dt>Cmd+[ and Cmd+]</dt><dd>Previous or next sentence while reading</dd>
+          <dt>Cmd+Shift+M</dt><dd>Turn Talk on or off (Option+M also works outside text)</dd>
           <dt>Cmd+K</dt><dd>Type an instruction</dd>
-          <dt>Cmd+F</dt><dd>Find and replace</dd>
+          <dt>Cmd+F, Cmd+Option+F</dt><dd>Find, or find and replace</dd>
+          <dt>Cmd+G, Cmd+Shift+G</dt><dd>Next or previous match</dd>
           <dt>Cmd+Option+M</dt><dd>Comment on the selection or paragraph</dd>
+          <dt>Cmd+Shift+E</dt><dd>Track changes on or off</dd>
+          <dt>A, R</dt><dd>Accept or reject the focused change in the Changes list</dd>
           <dt>Cmd+Shift+F</dt><dd>Focus mode</dd>
           <dt>Cmd+Enter</dt><dd>Accept the suggestion for this paragraph</dd>
-          <dt>Cmd+Z</dt><dd>Undo, including accepted suggestions</dd>
+          <dt>Cmd+Z, Cmd+Shift+Z</dt><dd>Undo and redo, including accepted suggestions and changes</dd>
           <dt>Cmd+Shift+H</dt><dd>Toggle heading</dd>
+          <dt>Option+Shift+Up or Down</dt><dd>Move the paragraph up or down</dd>
           <dt>Cmd+\</dt><dd>Show or hide the panel</dd>
+          <dt>Cmd+S</dt><dd>Save now</dd>
+          <dt>Cmd+N, Cmd+O, Cmd+,</dt><dd>New document, import, settings</dd>
+          <dt>Cmd+Plus, Cmd+Minus, Cmd+0</dt><dd>Larger or smaller text, actual size (Mac app)</dd>
         </dl>
       </details>
       <div class="dialog-actions">
@@ -393,7 +403,7 @@
     <form method="dialog">
       <p id="confirmText"></p>
       <div class="dialog-actions">
-        <button value="cancel" class="btn" type="submit">Cancel</button>
+        <button value="cancel" class="btn" type="submit" id="confirmCancel">Cancel</button>
         <button value="ok" class="btn danger" type="submit" id="confirmOk">Delete</button>
       </div>
     </form>

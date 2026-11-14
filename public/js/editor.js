@@ -97,6 +97,7 @@ export class Editor extends EventTarget {
       div.className = `para${p.type === 'heading' ? ' heading' : ''}`;
       div.dataset.id = p.id;
       div.dataset.placeholder = i === 0 ? 'Start writing, or paste your draft' : '';
+      div.dir = 'auto'; // right-to-left paragraphs align correctly
       div.textContent = p.text;
       // An empty block needs a <br> or the browser cannot put the caret in it.
       if (!p.text) { div.appendChild(document.createElement('br')); div.classList.add('is-empty'); }
@@ -272,7 +273,7 @@ export class Editor extends EventTarget {
   collectFlags() {
     const out = [];
     this.paragraphs.forEach((p, index) => {
-      for (const f of findFlags(p.text, this.groups)) out.push({ ...f, index });
+      for (const f of findFlags(p.text, this.groups, { style: this.style })) out.push({ ...f, index });
     });
     return out;
   }
@@ -285,7 +286,7 @@ export class Editor extends EventTarget {
         this.paragraphs.forEach((p, i) => {
           const el = this.paraEl(i);
           if (!el) return;
-          for (const f of findFlags(p.text, this.groups)) (f.sentence ? hard : word).push(rangeFromOffsets(el, f.start, f.end));
+          for (const f of findFlags(p.text, this.groups, { style: this.style })) (f.sentence ? hard : word).push(rangeFromOffsets(el, f.start, f.end));
         });
       }
       word.length ? CSS.highlights.set('flag', new Highlight(...word)) : CSS.highlights.delete('flag');
@@ -411,7 +412,7 @@ export class Editor extends EventTarget {
   // ---------- Undo ----------
 
   snapshot() {
-    return { paragraphs: this.getParagraphs(), caret: this.getCaret() };
+    return { paragraphs: this.getParagraphs(), caret: this.getCaret(), extra: this.extraState?.get() };
   }
 
   pushUndo() {
@@ -421,6 +422,7 @@ export class Editor extends EventTarget {
   }
 
   restore(state) {
+    if (this.extraState && state.extra !== undefined) this.extraState.set(state.extra);
     this.paragraphs = state.paragraphs.map((p) => ({ ...p }));
     this.render();
     if (state.caret) this.setCaret(state.caret.index, state.caret.offset);
@@ -474,28 +476,62 @@ export class Editor extends EventTarget {
   }
 
   insertPlainText(text) {
-    const normalized = text.replace(/\r\n?/g, '\n');
-    const blocks = normalized.split(/\n\s*\n|\n/).map((b) => b.trim());
-    this.pushUndo();
-    if (blocks.length <= 1) {
-      document.execCommand('insertText', false, normalized.replace(/\n/g, ' '));
+    const normalized = text.replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ');
+    // Paragraphs are separated by line breaks. Blank lines at the start and end do not make new paragraphs,
+    // but text that ends in a paragraph break leaves the caret at the start of a new paragraph.
+    let blocks = normalized.split(/\n\s*\n|\n/);
+    // A line break before the text starts a new paragraph for it.
+    const startsWithBreak = /^[ \t]*\n/.test(normalized) && normalized.trim().length > 0;
+    while (blocks.length && !blocks[0].trim()) blocks.shift();
+    const endsWithBreak = /\n\s*$/.test(normalized) && blocks.length > 0;
+    while (blocks.length && !blocks[blocks.length - 1].trim()) blocks.pop();
+    if (!blocks.length) {
+      if (/\n/.test(normalized)) this.splitAtCaret(); // a lone line break starts a new paragraph
       return;
     }
+    // Pasted Markdown: drop emphasis marks and list bullets, keep numbers ("1. Smith") as written.
+    const unmark = (t) => t.replace(/\*\*(\S(?:.*?\S)?)\*\*/g, '$1').replace(/^[-*+]\s+(?=\S)/, '');
+    const multi = blocks.length > 1 || endsWithBreak || startsWithBreak;
+    // Keep the leading space of the first block so "abstracts." + " Next" stays two words.
+    blocks = blocks.map((b, i) => (i === 0 ? (multi ? unmark(b.replace(/\s+$/, '')) : b.replace(/\s+$/, '')) : unmark(b.trim())));
+    if (startsWithBreak) blocks.unshift('');
+    if (blocks.length === 1 && !endsWithBreak) {
+      this.pushUndo();
+      document.execCommand('insertText', false, blocks[0]);
+      return;
+    }
+    // Save the undo step before removing the selected text, so Cmd+Z brings the selection back too.
+    this.pushUndo();
+    const undoAt = this.undoStack.length;
     const sel = document.getSelection();
     if (sel && !sel.isCollapsed) document.execCommand('delete');
     this.syncFromDom();
     const c = this.getCaret() || { index: this.paragraphs.length - 1, offset: this.paragraphs.at(-1).text.length };
-    const p = this.paragraphs[c.index];
+    const next = this.getParagraphs();
+    const p = next[c.index];
     const head = p.text.slice(0, c.offset);
     const tail = p.text.slice(c.offset);
+    if (!head.trim() && /^#{1,6}\s/.test(blocks[0])) { p.type = 'heading'; blocks[0] = blocks[0].replace(/^#{1,6}\s+/, ''); }
     p.text = head + blocks[0];
-    const added = blocks.slice(1).filter(Boolean).map((t) => ({ id: uid(), type: 'body', text: t }));
-    const last = added.at(-1);
-    const caretOffset = last.text.length;
-    last.text += tail;
-    this.paragraphs.splice(c.index + 1, 0, ...added);
+    // Pasted Markdown headings ("# Methods") become headings.
+    const added = blocks.slice(1).filter(Boolean).map((t) => (/^#{1,6}\s/.test(t) ? { id: uid(), type: 'heading', text: t.replace(/^#{1,6}\s+/, '') } : { id: uid(), type: 'body', text: t }));
+    if (endsWithBreak) added.push({ id: uid(), type: 'body', text: '' });
+    let caretIndex = c.index;
+    let caretOffset = p.text.length;
+    if (added.length) {
+      const last = added[added.length - 1];
+      caretIndex = c.index + added.length;
+      caretOffset = last.text.length;
+      last.text += tail.replace(/^\s+/, endsWithBreak ? '' : ' ').replace(/^ $/, '');
+    } else {
+      p.text += tail;
+    }
+    next.splice(c.index + 1, 0, ...added);
+    // The delete may have pushed its own step through beforeinput; keep only the one saved above.
+    this.undoStack.length = undoAt;
+    this.paragraphs = next;
     this.render();
-    this.setCaret(c.index + added.length, caretOffset);
+    this.setCaret(caretIndex, caretOffset);
     this.emitChange();
   }
 
@@ -518,7 +554,12 @@ export class Editor extends EventTarget {
     this.suggestions.push(s);
     const el = this.root.querySelector(`.para[data-id="${CSS.escape(s.paraId)}"]`);
     this.root.querySelector(`.inline-sugg[data-para="${CSS.escape(s.paraId)}"]`)?.remove();
-    if (el) el.after(this.buildInlineSuggestion(s));
+    if (el) {
+      const box = this.buildInlineSuggestion(s);
+      el.after(box);
+      // Keep the Accept and Reject buttons on screen.
+      requestAnimationFrame(() => box.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }));
+    }
     this.dispatchEvent(new Event('suggestions'));
   }
 
@@ -597,8 +638,15 @@ export class Editor extends EventTarget {
         return;
       }
       if (e.inputType === 'insertFromPaste' || e.inputType === 'insertFromDrop') return; // handled by paste/drop
-      // Group typing into one undo step per pause.
-      if (!this.typingTimer) this.pushUndo();
+      // Group typing into undo steps: a new step after a pause, after a sentence ends, or every few seconds.
+      const now = Date.now();
+      const boundary = e.inputType === 'insertText' && /[.!?]/.test(this.lastTyped || '') && e.data === ' ';
+      if (!this.typingTimer || boundary || now - (this.typingStarted || 0) > 4000 || e.inputType !== this.lastInputType) {
+        this.pushUndo();
+        this.typingStarted = now;
+      }
+      this.lastTyped = e.data || '';
+      this.lastInputType = e.inputType;
       clearTimeout(this.typingTimer);
       this.typingTimer = setTimeout(() => { this.typingTimer = null; }, 900);
     });
@@ -632,8 +680,8 @@ export class Editor extends EventTarget {
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         this.redo();
-      } else if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
-        // Word's shortcut for moving a paragraph.
+      } else if (e.altKey && e.shiftKey && !mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && document.getSelection()?.isCollapsed) {
+        // Word's shortcut for moving a paragraph. With a selection the system's extend-selection keeps working.
         e.preventDefault();
         this.moveParagraph(e.key === 'ArrowUp' ? -1 : 1);
       } else if (mod && e.shiftKey && e.key.toLowerCase() === 'h') {

@@ -40,37 +40,53 @@ export class LanguageChecker extends EventTarget {
     this.timer = setTimeout(() => this.run(), delay);
   }
 
-  key(issue, paraText) {
-    return `${issue.kind}\u0000${issue.text}\u0000${paraText}`;
+  // Ignoring a word applies to that word and rule everywhere in the document, and is saved with it.
+  key(issue) {
+    return `${issue.kind}\u0000${issue.text}`;
+  }
+
+  loadIgnored(list = []) {
+    this.ignored = new Set(Array.isArray(list) ? list : []);
+  }
+
+  ignoredList() {
+    return [...this.ignored];
   }
 
   async run() {
     const seq = ++this.seq;
     const paras = this.editor.paragraphs.map((p) => p.text);
     const missing = [...new Set(paras.filter((t) => t.trim() && !this.cache.has(t)))];
-    if (missing.length) {
+    // Send in batches so a long document never ties up the server for long.
+    for (let k = 0; k < missing.length; k += 60) {
+      const batch = missing.slice(k, k + 60);
       try {
         const res = await fetch('/api/grammar', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ paragraphs: missing }),
+          body: JSON.stringify({ paragraphs: batch }),
         });
         if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || 'Grammar check failed');
         const { issues } = await res.json();
-        missing.forEach((t) => this.cache.set(t, []));
-        for (const i of issues) this.cache.get(missing[i.paraIndex]).push(i);
-        if (this.cache.size > 400) this.cache = new Map([...this.cache].slice(-200));
+        batch.forEach((t) => this.cache.set(t, []));
+        for (const i of issues) this.cache.get(batch[i.paraIndex]).push(i);
       } catch (e) {
         if (seq === this.seq) this.dispatchEvent(new CustomEvent('error', { detail: e.message }));
         return;
       }
+      if (seq !== this.seq) return; // a newer run started
+    }
+    // Forget old versions of paragraphs, never the ones in the document now.
+    const keep = new Set(paras);
+    if (this.cache.size > keep.size + 300) {
+      for (const t of this.cache.keys()) if (!keep.has(t)) this.cache.delete(t);
     }
     if (seq !== this.seq) return;
     const now = this.editor.paragraphs;
     this.issues = [];
     now.forEach((p, index) => {
       for (const i of this.cache.get(p.text) || []) {
-        if (this.ignored.has(this.key(i, p.text))) continue;
+        if (this.ignored.has(this.key(i))) continue;
         this.issues.push({ ...i, index });
       }
     });
@@ -116,16 +132,18 @@ export class LanguageChecker extends EventTarget {
   ignoreAll(list) {
     for (const i of list) {
       const p = this.editor.paragraphs[i.index];
-      if (p) this.ignored.add(this.key(i, p.text));
+      if (p) this.ignored.add(this.key(i));
     }
     this.hide();
+    this.dispatchEvent(new Event('ignore'));
     this.run();
   }
 
   ignore(issue) {
     const p = this.editor.paragraphs[issue.index];
-    if (p) this.ignored.add(this.key(issue, p.text));
+    if (p) this.ignored.add(this.key(issue));
     this.hide();
+    this.dispatchEvent(new Event('ignore'));
     this.run();
   }
 

@@ -384,6 +384,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         webView.setValue(false, forKey: "drawsBackground")
         window.contentView?.addSubview(webView)
         dictation.webView = webView
+        let savedZoom = UserDefaults.standard.double(forKey: "pageZoom")
+        if savedZoom > 0 { webView.pageZoom = CGFloat(savedZoom) }
         updater.window = window
         updater.canReplaceSelf = bundledApp != nil
         // Check quietly a few seconds after launch so startup stays fast.
@@ -640,6 +642,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let view = NSMenu(title: "View")
         let reload = view.addItem(withTitle: "Reload", action: #selector(reloadWebView), keyEquivalent: "r")
         reload.keyEquivalentModifierMask = [.command, .shift]
+        view.addItem(.separator())
+        view.addItem(withTitle: "Actual Size", action: #selector(zoomReset), keyEquivalent: "0")
+        view.addItem(withTitle: "Zoom In", action: #selector(zoomIn), keyEquivalent: "=")
+        view.addItem(withTitle: "Zoom Out", action: #selector(zoomOut), keyEquivalent: "-")
+        view.addItem(.separator())
         view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f").keyEquivalentModifierMask = [.command, .control]
         viewItem.submenu = view
 
@@ -661,6 +668,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     @objc func reloadWebView() {
         webView.reload()
     }
+
+    // Text size: the whole page scales, and the choice is remembered between launches.
+    func setZoom(_ value: CGFloat) {
+        let z = min(2.0, max(0.7, value))
+        webView.pageZoom = z
+        UserDefaults.standard.set(Double(z), forKey: "pageZoom")
+    }
+    @objc func zoomIn() { setZoom(webView.pageZoom + 0.1) }
+    @objc func zoomOut() { setZoom(webView.pageZoom - 0.1) }
+    @objc func zoomReset() { setZoom(1.0) }
 }
 
 let app = NSApplication.shared
