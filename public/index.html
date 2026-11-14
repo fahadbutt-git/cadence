@@ -57,6 +57,7 @@
         </button>
         <input id="docTitle" class="title-input" type="text" aria-label="Document title" placeholder="Untitled" spellcheck="false" />
         <span id="saveState" class="muted small" aria-live="polite"></span>
+        <span id="status" class="status small" role="status" aria-live="polite" hidden></span>
       </div>
       <div class="bar-actions">
         <span id="docStats" class="muted small"></span>
@@ -101,13 +102,11 @@
         </div>
         <article id="paper" class="paper" aria-label="Document text"></article>
         <article id="markup" class="paper markup" aria-label="Document with all changes shown" hidden></article>
-        <div id="caption" class="caption" role="status" aria-live="polite" hidden>
-          <span id="captionWho" class="who"></span>
-          <span id="captionText"></span>
-        </div>
       </div>
 
       <aside id="panel" class="panel" aria-label="Side panel">
+        <div class="panel-resize" id="panelResize" role="separator" aria-orientation="vertical" aria-label="Resize the panel" tabindex="0" title="Drag to resize. Double-click to reset."></div>
+        <div class="panel-head">
         <div class="tabs" role="tablist">
           <button role="tab" class="tab" aria-selected="true" data-tab="edit">Edit</button>
           <button role="tab" class="tab" aria-selected="false" data-tab="comments">Comments <span id="commentCount" class="count neutral" hidden></span></button>
@@ -115,6 +114,9 @@
           <button role="tab" class="tab" aria-selected="false" data-tab="checks">Checks <span id="flagCount" class="count" hidden></span></button>
           <button role="tab" class="tab" aria-selected="false" data-tab="history">History</button>
         </div>
+        <button class="icon-btn panel-close" id="panelClose" type="button" aria-label="Hide the panel" title="Hide the panel (Cmd+\)"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15"/></svg></button>
+        </div>
+        <div class="panel-body">
 
         <div class="tabpanel" data-panel="edit">
           <p id="targetLabel" class="muted small">Working on paragraph 1</p>
@@ -182,35 +184,43 @@
         </div>
 
         <div class="tabpanel" data-panel="checks" hidden>
-          <h3 class="sub first">Spelling and grammar</h3>
-          <ul id="issueList" class="flags"></ul>
-          <p id="issuesEmpty" class="muted small">No spelling or grammar issues found.</p>
-          <h3 class="sub">Readability</h3>
-          <dl class="stats" id="statsGrid"></dl>
-          <h3 class="sub">Style</h3>
-          <div class="group-toggles">
-            <label class="toggle small"><input type="checkbox" data-group="house" checked /> <span>Stock AI phrasing</span></label>
-            <label class="toggle small"><input type="checkbox" data-group="clarity" checked /> <span>Clarity</span></label>
-            <label class="toggle small"><input type="checkbox" data-group="style" checked /> <span>Clichés and repetition</span></label>
-            <label class="toggle small"><input id="showFlags" type="checkbox" checked /> <span>Underline in the text</span></label>
-          </div>
-          <ul id="flagList" class="flags"></ul>
-          <p id="flagsEmpty" class="muted small" hidden>Nothing flagged.</p>
-          <h3 class="sub">Document</h3>
-          <label class="field inline">
-            <span>Word target</span>
-            <input id="wordTarget" type="number" min="0" step="50" placeholder="None" />
-          </label>
-          <label class="field">
-            <span>Writing style</span>
-            <select id="styleSelect">
-              <option value="narrative">Personal statement or narrative, Arial</option>
-              <option value="academic">Academic manuscript, Times New Roman</option>
-            </select>
-          </label>
-          <details class="report">
-            <summary>Full report</summary>
-            <pre id="reportText"></pre>
+          <details class="section" open>
+            <summary><span>Spelling and grammar</span><span id="issueSum" class="sum"></span></summary>
+            <ul id="issueList" class="flags"></ul>
+            <p id="issuesEmpty" class="muted small">No spelling or grammar issues found.</p>
+          </details>
+          <details class="section" open>
+            <summary><span>Style</span><span id="flagSum" class="sum"></span></summary>
+            <div class="group-toggles">
+              <label class="toggle small"><input type="checkbox" data-group="house" checked /> <span>Stock AI phrasing</span></label>
+              <label class="toggle small"><input type="checkbox" data-group="clarity" checked /> <span>Clarity</span></label>
+              <label class="toggle small"><input type="checkbox" data-group="style" checked /> <span>Clichés and repetition</span></label>
+              <label class="toggle small"><input id="showFlags" type="checkbox" checked /> <span>Underline in the text</span></label>
+            </div>
+            <ul id="flagList" class="flags"></ul>
+            <p id="flagsEmpty" class="muted small" hidden>Nothing flagged.</p>
+          </details>
+          <details class="section">
+            <summary><span>Readability</span><span id="statSum" class="sum"></span></summary>
+            <dl class="stats" id="statsGrid"></dl>
+            <details class="report">
+              <summary>Full report</summary>
+              <pre id="reportText"></pre>
+            </details>
+          </details>
+          <details class="section">
+            <summary><span>Document settings</span></summary>
+            <label class="field inline">
+              <span>Word target</span>
+              <input id="wordTarget" type="number" min="0" step="50" placeholder="None" />
+            </label>
+            <label class="field">
+              <span>Writing style</span>
+              <select id="styleSelect">
+                <option value="narrative">Personal statement or narrative, Arial</option>
+                <option value="academic">Academic manuscript, Times New Roman</option>
+              </select>
+            </label>
           </details>
         </div>
 
@@ -220,6 +230,7 @@
           </div>
           <button id="snapshotBtn" class="btn" type="button">Save a version now</button>
           <ul id="revisionList" class="revisions"></ul>
+        </div>
         </div>
       </aside>
     </div>
@@ -239,6 +250,7 @@
       </div>
       <div class="position">
         <span id="positionLabel" class="small">Press play or Option+Space to listen from the cursor</span>
+        <div id="caption" class="caption" role="status" aria-live="polite" hidden><span id="captionWho" class="who"></span> <span id="captionText"></span></div>
         <div id="strip" class="strip" role="slider" aria-label="Sentences in this document" tabindex="0"></div>
       </div>
       <div class="voice-controls">
@@ -317,6 +329,7 @@
         <input id="setReviewer" type="text" placeholder="Shown on comments in Word exports" />
       </label>
       <label class="toggle"><input type="checkbox" id="setGrammar" /> <span>Check spelling and grammar as I write (runs on this Mac)</span></label>
+      <label class="toggle"><input type="checkbox" id="setSelBar" /> <span>Show the toolbar when I select text</span></label>
       <fieldset class="field">
         <legend>Personal dictionary</legend>
         <small class="muted">Words the spelling check accepts. Add more from any spelling suggestion.</small>
@@ -387,7 +400,6 @@
   </dialog>
 
   <input type="file" id="fileInput" accept=".docx,.md,.markdown,.txt" hidden />
-  <div id="toasts" class="toasts" aria-live="polite"></div>
   <div id="dropOverlay" class="drop-overlay" hidden><p>Drop to import</p></div>
 
   <script type="module" src="/app.js"></script>

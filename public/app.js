@@ -61,13 +61,19 @@ const finder = new FindBar(editor, {
 
 // ---------- Toasts ----------
 
+// Messages show in the top bar beside the save state, not over the page.
+let statusTimer = null;
 function toast(message, kind = '') {
   if (!message) return;
-  const t = document.createElement('div');
-  t.className = `toast ${kind}`;
-  t.textContent = message;
-  $('#toasts').appendChild(t);
-  setTimeout(() => t.remove(), kind === 'error' ? 6000 : 3800);
+  const el = $('#status');
+  el.textContent = message;
+  el.title = message;
+  el.className = `status small ${kind}`;
+  el.hidden = false;
+  $('#saveState').hidden = true;
+  $('#docStats').hidden = true;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => { el.hidden = true; $('#saveState').hidden = false; $('#docStats').hidden = false; }, kind === 'error' ? 8000 : 4500);
 }
 
 // ---------- Config ----------
@@ -379,7 +385,7 @@ function refreshDerived() {
   const paras = editor.paragraphs;
   const stats = computeBurstinessStats(paras);
   const target = Number($('#wordTarget').value) || 0;
-  $('#docStats').textContent = `${stats.wordCount.toLocaleString('en-CA')}${target ? ` of ${target.toLocaleString('en-CA')}` : ''} words, about ${stats.listenTimeFormatted} to listen`;
+  $('#docStats').textContent = `${stats.wordCount.toLocaleString('en-CA')}${target ? ` of ${target.toLocaleString('en-CA')}` : ''} words, ${stats.listenTimeFormatted} to listen`;
 
   const flags = editor.collectFlags();
   updateCheckBadge(flags);
@@ -396,15 +402,18 @@ function refreshDerived() {
     .join('');
 
   $('#flagsEmpty').hidden = flags.length > 0;
+  $('#flagSum').textContent = flags.length ? String(flags.length) : '';
+  $('#statSum').textContent = stats.wordCount ? `Grade ${stats.gradeLevel.toFixed(1)}` : '';
   $('#flagList').innerHTML = flags
     .slice(0, 200)
-    .map((f, i) => `<li class="flag-item" data-i="${i}" tabindex="0"><span class="snippet"><b>${escapeHtml((() => { const t = f.text.replace(/^[,\s]+/, '') || f.text; return t.length > 60 ? t.slice(0, 60) + '…' : t; })())}</b><span class="muted">${f.label}</span></span><span class="where">Paragraph ${f.index + 1}</span></li>`)
+    .map((f, i) => `<li class="flag-item" data-i="${i}" tabindex="0"><span class="flag-label">${f.label}</span><span class="where">Paragraph ${f.index + 1}</span><span class="snippet">${escapeHtml((f.text.replace(/^[,\s]+/, '') || f.text).slice(0, 160))}</span></li>`)
     .join('');
   $('#flagList').onclick = (e) => {
     const li = e.target.closest('.flag-item');
     if (!li) return;
     const f = flags[Number(li.dataset.i)];
     quietSelection = true;
+    revealInDocument();
     editor.focusFlag(f.index, f.start, f.end);
   };
 
@@ -413,26 +422,58 @@ function refreshDerived() {
   renderStrip();
 }
 
+// Issues with the same word and message are grouped, so a name flagged five times is one row.
+let issueGroups = [];
 function renderIssues() {
   const list = language.enabled ? language.issues : [];
+  const groups = new Map();
+  for (const i of list) {
+    const k = `${i.text}\u0000${i.message}`;
+    if (!groups.has(k)) groups.set(k, { text: i.text, message: i.message, kind: i.kind, suggestions: i.suggestions, items: [] });
+    groups.get(k).items.push(i);
+  }
+  issueGroups = [...groups.values()];
+  $('#issueSum').textContent = list.length ? String(list.length) : '';
   $('#issuesEmpty').hidden = list.length > 0;
   $('#issuesEmpty').textContent = language.enabled ? 'No spelling or grammar issues found.' : 'Spelling and grammar checking is off. Turn it on in Settings.';
-  $('#issueList').innerHTML = list
+  $('#issueList').innerHTML = issueGroups
     .slice(0, 200)
-    .map((i, n) => `<li class="flag-item issue-item" data-n="${n}" tabindex="0"><span><b>${escapeHtml(i.text.length > 40 ? i.text.slice(0, 40) + '…' : i.text)}</b>${
-      i.suggestions[0] !== undefined ? `<button class="btn subtle fix" data-fix="${n}" type="button" title="Apply">${i.suggestions[0] === '' ? 'Remove' : escapeHtml(i.suggestions[0])}</button>` : ''
-    }<br><span class="muted">${escapeHtml(i.message.replace(/`/g, ''))}</span></span><span class="where">Paragraph ${i.index + 1}</span></li>`)
+    .map((g, n) => {
+      const fix = g.suggestions[0];
+      const many = g.items.length > 1;
+      const paras = [...new Set(g.items.map((i) => i.index + 1))];
+      const where = paras.length > 1 ? `Paragraphs ${paras.slice(0, 4).join(', ')}${paras.length > 4 ? '…' : ''}` : `Paragraph ${paras[0]}`;
+      const fixLabel = fix === undefined ? '' : fix === '' ? 'Remove' : `Change to “${escapeHtml(fix)}”`;
+      const spelling = ['Spelling', 'Typo'].includes(g.kind);
+      return `<li class="issue-row" data-g="${n}" tabindex="0">
+        <div class="issue-top"><b>${escapeHtml(g.text.length > 40 ? g.text.slice(0, 40) + '…' : g.text)}</b>${many ? `<span class="times">${g.items.length} times</span>` : ''}<span class="where">${where}</span></div>
+        <div class="issue-msg">${escapeHtml(g.message.replace(/`/g, ''))}</div>
+        <div class="issue-actions">${fix !== undefined ? `<button class="btn" data-gact="fix" type="button">${many && fix !== '' ? `Change all to “${escapeHtml(fix)}”` : many ? 'Remove all' : fixLabel}</button>` : ''}${spelling ? '<button class="btn subtle" data-gact="dict" type="button">Add to dictionary</button>' : ''}<button class="btn subtle" data-gact="ignore" type="button">Ignore</button></div>
+      </li>`;
+    })
     .join('');
 }
+const issueCursor = new Map();
 $('#issueList').addEventListener('click', (e) => {
-  const fix = e.target.closest('[data-fix]');
-  const li = e.target.closest('.issue-item');
-  if (!li) return;
-  const issue = language.issues[Number(li.dataset.n)];
-  if (!issue) return;
-  if (fix) return language.apply(issue, issue.suggestions[0]);
+  const row = e.target.closest('.issue-row');
+  if (!row) return;
+  const g = issueGroups[Number(row.dataset.g)];
+  if (!g) return;
+  const act = e.target.closest('[data-gact]')?.dataset.gact;
+  if (act === 'fix') { const n = language.applyAll(g.items, g.suggestions[0]); if (n > 1) toast(`Changed ${n} places. Cmd+Z to undo.`); return; }
+  if (act === 'ignore') return language.ignoreAll(g.items);
+  if (act === 'dict') return language.dispatchEvent(new CustomEvent('add-word', { detail: g.text }));
+  // Clicking the row steps through each place it occurs.
+  const k = `${g.text}|${g.message}`;
+  const at = (issueCursor.get(k) ?? -1) + 1;
+  issueCursor.set(k, at % g.items.length);
+  const i = g.items[at % g.items.length];
   quietSelection = true;
-  editor.selectRange(issue.index, issue.start, issue.end);
+  revealInDocument();
+  editor.selectRange(i.index, i.start, i.end);
+});
+$('#issueList').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.classList.contains('issue-row')) { e.preventDefault(); e.target.click(); }
 });
 // The badge counts what usually needs fixing: spelling, grammar and stock AI phrasing.
 function updateCheckBadge(flags = editor.collectFlags()) {
@@ -718,7 +759,7 @@ editor.addEventListener('selection', () => {
     if (info && !info.multi) pendingSelectionTarget = { index: info.index, start: info.start, end: info.end, text: info.text, kind: 'selection' };
     else if (!info && editor.getCaret()) pendingSelectionTarget = null; // caret collapsed inside the editor
     updateTargetLabel();
-    if (!info || player.playing || quietSelection) { selBar.hidden = true; quietSelection = false; return; }
+    if (!info || player.playing || quietSelection || state.config?.selectionToolbar === false) { selBar.hidden = true; quietSelection = false; return; }
     lastSelection = info;
     selBar.querySelectorAll('[data-sel]').forEach((b) => { b.hidden = info.multi && b.dataset.sel !== 'listen'; });
     $('#choiceBtn').textContent = WordChoice.isShort(info.text) ? 'Synonyms' : 'Reword';
@@ -777,6 +818,7 @@ function caption(who, text) {
   const el = $('#caption');
   if (!talk.on && who !== 'cadence') { el.hidden = true; return; }
   el.hidden = !text;
+  $('#positionLabel').hidden = !el.hidden;
   el.dataset.who = who;
   $('#captionWho').textContent = who === 'you' ? 'You' : who === 'cadence' ? 'Cadence' : '';
   $('#captionText').textContent = text;
@@ -1121,7 +1163,7 @@ async function toggleTracking(force) {
   if (turnOn) {
     tracker.start();
     openPanel('changes');
-    toast('Tracking changes. Edits now show as changes you can accept or reject.');
+    toast('Tracking changes');
   } else if (tracker.on || tracker.baseline) {
     const n = tracker.hunks.length;
     if (n && !(await confirmDialog(`Stop tracking? The ${n} pending change${n === 1 ? '' : 's'} will be kept in the text as accepted. Reject any you do not want first.`))) {
@@ -1136,6 +1178,8 @@ async function toggleTracking(force) {
 
 tracker.addEventListener('change', () => { scheduleSave(); setTrackUi(); });
 tracker.addEventListener('update', setTrackUi);
+tracker.addEventListener('select', () => { if (tracker.view !== 'all') revealInDocument(); });
+comments.addEventListener('reveal', revealInDocument);
 tracker.addEventListener('view', (e) => {
   $('#paper').hidden = e.detail === 'all';
   $('#markupView').value = e.detail;
@@ -1144,8 +1188,8 @@ tracker.addEventListener('view', (e) => {
 $('#trackToggle').addEventListener('click', () => toggleTracking());
 $('#trackOn').addEventListener('change', () => toggleTracking($('#trackOn').checked));
 $('#markupView').addEventListener('change', () => tracker.setView($('#markupView').value));
-$('#changeNext').addEventListener('click', () => tracker.step(1));
-$('#changePrev').addEventListener('click', () => tracker.step(-1));
+$('#changeNext').addEventListener('click', () => { revealInDocument(); tracker.step(1); });
+$('#changePrev').addEventListener('click', () => { revealInDocument(); tracker.step(-1); });
 $('#acceptAll').addEventListener('click', () => { const n = tracker.acceptAll(); if (n) toast(`Accepted ${n} change${n === 1 ? '' : 's'}`); });
 $('#rejectAll').addEventListener('click', async () => {
   const n = tracker.hunks.length;
@@ -1193,27 +1237,86 @@ try { if (localStorage.getItem('cadence_focus')) setFocusMode(true); } catch (e)
 
 // ---------- Panel ----------
 
+// The panel is docked beside the page and can be resized by dragging its edge.
+// In a narrow window it takes the whole width instead of covering the page.
+const PANEL_MIN = 300;
+const PANEL_DEFAULT = 380;
+const narrow = () => window.innerWidth < 820;
+function panelMax() { return Math.max(PANEL_MIN, Math.min(720, window.innerWidth - 420)); }
+function setPanelWidth(w, save = true) {
+  const width = Math.round(Math.min(panelMax(), Math.max(PANEL_MIN, w)));
+  document.documentElement.style.setProperty('--panel-w', `${width}px`);
+  $('#panelResize').setAttribute('aria-valuenow', String(width));
+  if (save) try { localStorage.setItem('cadence_panel_w', String(width)); } catch (e) {}
+}
+function setPanelVisible(show) {
+  $('#editorView').classList.toggle('panel-hidden', !show);
+  $('#panelToggle').setAttribute('aria-pressed', String(show));
+  if (!narrow()) try { localStorage.setItem('cadence_panel_hidden', show ? '' : '1'); } catch (e) {}
+}
 function openPanel(tab) {
-  $('#editorView').classList.remove('panel-hidden');
-  $('#panelToggle').setAttribute('aria-pressed', 'true');
+  setPanelVisible(true);
   if (tab) selectTab(tab);
+}
+/** In a narrow window, close the full-width panel so the text the user picked is visible. */
+function revealInDocument() {
+  if (narrow() && !$('#editorView').classList.contains('panel-hidden')) setPanelVisible(false);
 }
 function selectTab(tab) {
   $$('.tab').forEach((t) => t.setAttribute('aria-selected', String(t.dataset.tab === tab)));
   $$('.tabpanel').forEach((p) => { p.hidden = p.dataset.panel !== tab; });
+  try { localStorage.setItem('cadence_tab', tab); } catch (e) {}
 }
 $$('.tab').forEach((t) => t.addEventListener('click', () => selectTab(t.dataset.tab)));
-$('#panelToggle').addEventListener('click', () => {
-  const hidden = $('#editorView').classList.toggle('panel-hidden');
-  $('#panelToggle').setAttribute('aria-pressed', String(!hidden));
-  try { localStorage.setItem('cadence_panel_hidden', hidden ? '1' : ''); } catch (e) {}
+$('.tabs').addEventListener('keydown', (e) => {
+  if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+  const tabs = $$('.tab');
+  const i = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
+  const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+  selectTab(next.dataset.tab);
+  next.focus();
 });
-try {
-  if (localStorage.getItem('cadence_panel_hidden') || window.innerWidth < 1060) {
-    $('#editorView').classList.add('panel-hidden');
-    $('#panelToggle').setAttribute('aria-pressed', 'false');
-  }
-} catch (e) {}
+$('#panelToggle').addEventListener('click', () => setPanelVisible($('#editorView').classList.contains('panel-hidden')));
+$('#panelClose').addEventListener('click', () => setPanelVisible(false));
+(() => {
+  const handle = $('#panelResize');
+  let startX = 0;
+  let startW = 0;
+  const move = (e) => setPanelWidth(startW + (startX - e.clientX), false);
+  const up = (e) => {
+    handle.releasePointerCapture?.(e.pointerId);
+    handle.classList.remove('dragging');
+    document.body.classList.remove('resizing');
+    handle.removeEventListener('pointermove', move);
+    setPanelWidth($('#panel').getBoundingClientRect().width);
+  };
+  handle.addEventListener('pointerdown', (e) => {
+    if (narrow()) return;
+    e.preventDefault();
+    startX = e.clientX;
+    startW = $('#panel').getBoundingClientRect().width;
+    handle.setPointerCapture?.(e.pointerId);
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up, { once: true });
+  });
+  handle.addEventListener('dblclick', () => setPanelWidth(PANEL_DEFAULT));
+  handle.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    setPanelWidth($('#panel').getBoundingClientRect().width + (e.key === 'ArrowLeft' ? 24 : -24));
+  });
+  let saved = PANEL_DEFAULT;
+  try { saved = Number(localStorage.getItem('cadence_panel_w')) || PANEL_DEFAULT; } catch (e) {}
+  setPanelWidth(saved, false);
+  window.addEventListener('resize', () => setPanelWidth(saved = Number(localStorage.getItem('cadence_panel_w')) || PANEL_DEFAULT, false));
+  try {
+    if (localStorage.getItem('cadence_panel_hidden') || narrow()) setPanelVisible(false);
+    const tab = localStorage.getItem('cadence_tab');
+    if (tab && $(`.tab[data-tab="${tab}"]`)) selectTab(tab);
+  } catch (e) {}
+})();
 $('#showFlags').addEventListener('change', () => {
   editor.setFlagsEnabled($('#showFlags').checked);
   saveConfig({ showFlags: $('#showFlags').checked });
@@ -1360,6 +1463,7 @@ function openSettings() {
   renderPronunciations(c.pronunciations || []);
   $('#setReviewer').value = c.reviewerName || '';
   $('#setGrammar').checked = c.grammarCheck !== false;
+  $('#setSelBar').checked = c.selectionToolbar !== false;
   renderDictionary();
   $('#settingsDialog').showModal();
 }
@@ -1383,6 +1487,7 @@ $('#settingsDialog').addEventListener('close', async () => {
     pronunciations: readPronunciations(),
     reviewerName: $('#setReviewer').value.trim(),
     grammarCheck: $('#setGrammar').checked,
+    selectionToolbar: $('#setSelBar').checked,
   };
   const key = $('#setApiKey').value.trim();
   if (key) patch.apiKey = key;

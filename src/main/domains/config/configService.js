@@ -61,6 +61,7 @@ export function getDefaultConfig() {
     showFlags: true,
     reviewerName: '',
     grammarCheck: true,
+    selectionToolbar: true,
     checkGroups: { house: true, clarity: true, style: true },
     dictionary: [],
     pronunciations: [],
@@ -100,6 +101,7 @@ export function sanitizeConfigPatch(patch = {}) {
     out.checkGroups = { house: g.house !== false, clarity: g.clarity !== false, style: g.style !== false };
   }
   if (out.grammarCheck !== undefined) out.grammarCheck = Boolean(out.grammarCheck);
+  if (out.selectionToolbar !== undefined) out.selectionToolbar = Boolean(out.selectionToolbar);
   if (out.reviewerName !== undefined) out.reviewerName = String(out.reviewerName || '').trim().slice(0, 80);
   if (out.themePreference !== undefined && !['system', 'light', 'dark'].includes(out.themePreference)) {
     out.themePreference = 'system';

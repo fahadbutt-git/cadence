@@ -141,6 +141,7 @@ export class Comments extends EventTarget {
     else if (act === 'delete') this.remove(c.id);
     else if (act === 'suggest') this.dispatchEvent(new CustomEvent('suggest', { detail: c }));
     else if (act === 'show') {
+      this.dispatchEvent(new Event('reveal'));
       const loc = this.locate(c);
       if (loc) loc.end > loc.start ? this.editor.selectRange(loc.index, loc.start, loc.end) : this.editor.setCaret(loc.index, 0);
     }

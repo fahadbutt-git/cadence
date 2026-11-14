@@ -97,6 +97,31 @@ export class LanguageChecker extends EventTarget {
     return true;
   }
 
+  /** Apply one replacement to every listed issue in a single undo step. */
+  applyAll(list, replacement) {
+    const paras = this.editor.getParagraphs();
+    let n = 0;
+    const sorted = [...list].sort((a, b) => a.index - b.index || b.start - a.start);
+    for (const i of sorted) {
+      const p = paras[i.index];
+      if (!p || p.text.slice(i.start, i.end) !== i.text) continue;
+      p.text = p.text.slice(0, i.start) + replacement + p.text.slice(i.end);
+      n++;
+    }
+    if (n) this.editor.setParagraphs(paras);
+    this.hide();
+    return n;
+  }
+
+  ignoreAll(list) {
+    for (const i of list) {
+      const p = this.editor.paragraphs[i.index];
+      if (p) this.ignored.add(this.key(i, p.text));
+    }
+    this.hide();
+    this.run();
+  }
+
   ignore(issue) {
     const p = this.editor.paragraphs[issue.index];
     if (p) this.ignored.add(this.key(issue, p.text));

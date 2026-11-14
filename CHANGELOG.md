@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.4.0
+
+- Side panel rebuilt. It sits beside the page and never covers it. Drag its left edge to make it wider or narrower (double-click to reset). In a narrow window it fills the window while open, and picking an item takes you back to the text.
+- Tabs fit on one line, with a close button. Arrow keys move between tabs, and the last tab you used is remembered.
+- Checks is now in sections you can fold: Spelling and grammar, Style, Readability, Document settings, each with a count.
+- Spelling and grammar groups repeats of the same word, so a name flagged five times is one row with Change all, Add to dictionary and Ignore. Clicking the row steps through each place it occurs.
+- Style flags show the label, then the text, without cut-off sentences or nested scroll areas.
+- Messages now show in the top bar instead of a pop-up over the page. Talk captions show in the reader bar.
+- Settings can turn off the toolbar that appears when you select text.
+- The page margins shrink with the space available.
+
 ## 3.3.0
 
 - Track changes (Cmd+Shift+E), like Word's Track Changes and Google Docs' Suggesting mode. Every edit after you turn it on, typed, dictated or accepted from a suggestion, becomes a change you can accept or reject one at a time or all at once. Step through them with Previous and Next, or by voice ("next change", "accept", "reject", "accept all changes").
