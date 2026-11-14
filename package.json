@@ -1,0 +1,25 @@
+{
+  "name": "voice-manuscript-studio",
+  "version": "3.0.0",
+  "description": "Cadence: listen to your writing, edit by voice or selection, and review suggested changes inline.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test tests/*.test.js",
+    "build:macos": "bash scripts/build-macos-app.sh",
+    "app": "bash scripts/build-macos-app.sh && open \"Cadence Studio.app\""
+  },
+  "dependencies": {
+    "@google/genai": "^3.2.0",
+    "docx": "^9.5.1",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "mammoth": "^1.9.0",
+    "msedge-tts": "^2.1.1",
+    "multer": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

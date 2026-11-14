@@ -1,0 +1,11 @@
+node_modules/
+data/config.json
+data/uploads/
+data/revisions/
+data/server.log
+.env
+.DS_Store
+Cadence Studio.app/
+data/
+dist/
+node-runtime/

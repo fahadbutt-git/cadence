@@ -1,0 +1,64 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14   # Apple silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci --omit=dev
+
+      - name: Run tests
+        run: npm test
+
+      - name: Download Node runtime to pack inside the app
+        run: |
+          V="$(node -v)"
+          curl -fsSL "https://nodejs.org/dist/${V}/node-${V}-darwin-arm64.tar.gz" -o node.tgz
+          mkdir -p node-runtime && tar -xzf node.tgz -C node-runtime --strip-components=1
+
+      - name: Build Cadence.app
+        run: BUNDLE=1 NODE_DIR="$PWD/node-runtime" bash scripts/build-macos-app.sh
+
+      - name: Check the packed app starts its server
+        run: |
+          RES="dist/Cadence.app/Contents/Resources"
+          CADENCE_DATA_DIR="$RUNNER_TEMP/cadence-data" PORT=3990 "$RES/node/bin/node" "$RES/app/server.js" &
+          for i in $(seq 1 40); do curl -fs http://127.0.0.1:3990/api/health && break; sleep 0.25; done
+          curl -fs http://127.0.0.1:3990/api/documents | head -c 300
+          kill %1
+
+      - name: Zip
+        run: ditto -c -k --keepParent dist/Cadence.app Cadence-macOS-AppleSilicon.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cadence-macOS-AppleSilicon
+          path: Cadence-macOS-AppleSilicon.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Cadence-macOS-AppleSilicon.zip
+          body: |
+            **Install**
+            1. Download `Cadence-macOS-AppleSilicon.zip` below and double-click it.
+            2. Drag **Cadence.app** into **Applications**.
+            3. In Terminal, run once: `xattr -dr com.apple.quarantine /Applications/Cadence.app`
+               (the app is not notarized, so macOS blocks it until you do this).
+            4. Open Cadence. Your existing documents are copied in on first launch.

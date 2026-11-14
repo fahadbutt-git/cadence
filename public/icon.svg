@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2C6EC2"/>
+      <stop offset="1" stop-color="#143D75"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.14"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#sheen)"/>
+  <g stroke-linecap="round" fill="none">
+    <g stroke-width="54" stroke="#ffffff">
+      <line x1="252" y1="292" x2="700" y2="292" stroke-opacity="0.94"/>
+      <line x1="252" y1="402" x2="580" y2="402" stroke-opacity="0.94"/>
+      <line x1="252" y1="622" x2="500" y2="622" stroke-opacity="0.94"/>
+      <line x1="252" y1="732" x2="660" y2="732" stroke-opacity="0.5"/>
+    </g>
+    <line x1="252" y1="512" x2="560" y2="512" stroke="#A9CCF7" stroke-width="54"/>
+    <g stroke="#A9CCF7" stroke-width="36">
+      <path d="M648 452 a 84 84 0 0 1 0 120"/>
+      <path d="M718 402 a 150 150 0 0 1 0 220"/>
+    </g>
+  </g>
+</svg>
